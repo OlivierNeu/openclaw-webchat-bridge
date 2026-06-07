@@ -1,0 +1,4 @@
+# Volatile runtime state — never commit.
+.token
+local.env
+media-outbound/

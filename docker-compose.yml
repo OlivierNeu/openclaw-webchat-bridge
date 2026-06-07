@@ -1,0 +1,60 @@
+# OpenClaw → Convex bridge — docker-compose (NEW streaming architecture).
+#
+# The ONE thing this file must get right for outbound media (task #52): the
+# bridge and the OpenClaw container(s) SHARE the same `media/outbound` directory,
+# mounted READ-ONLY into the bridge. OpenClaw writes the agent file there; the
+# bridge reads it (LocalDirMediaFetcher) and streams it to Convex (no base64).
+#
+# Two share styles — pick the one matching your deployment:
+#   (A) SHARED NAMED VOLUME (recommended when OpenClaw + bridge + Convex live in
+#       the SAME compose / container environment — your stated NAS target). The
+#       OpenClaw service mounts `media-outbound:/home/node/.openclaw/media/outbound`
+#       (read-write) and the bridge mounts the SAME volume read-only. No host path.
+#   (B) HOST BIND (when media lives on an NFS export / host path shared across
+#       instances): mount ${OPENCLAW_MEDIA_OUTBOUND_HOST_DIR} read-only instead.
+#
+# Multi-instance rule (docs/DEPLOYMENT.md): EVERY OpenClaw instance must write to
+# this ONE shared dir. OpenClaw's `<name>---<uuid>.<ext>` filenames are already
+# UUID-suffixed, so cross-instance collisions don't occur.
+#
+# Secrets come from the environment / an .env file (NEVER committed). The bridge
+# reaches OpenClaw + Convex over the network — use service names when they run in
+# this same compose (e.g. ws://openclaw:8765, http://convex-backend:3211).
+
+services:
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw-webchat-bridge
+    restart: unless-stopped
+    ports:
+      - "${BRIDGE_PORT:-8787}:8787"
+    environment:
+      # --- OpenClaw gateway (operator connection) ---
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:?set the gateway WS URL}
+      OPENCLAW_TOKEN: ${OPENCLAW_TOKEN:?set the operator token}
+      OPENCLAW_DEVICE_IDENTITY: ${OPENCLAW_DEVICE_IDENTITY:?set the device identity JSON}
+      OPENCLAW_CANONICAL: ${OPENCLAW_CANONICAL:?set the canonical operator segment}
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      # --- Convex ingest (self-hosted: use the .site origin / service name) ---
+      CONVEX_HTTP_ACTIONS_URL: ${CONVEX_HTTP_ACTIONS_URL:?set the Convex .site origin}
+      BRIDGE_INGEST_SECRET: ${BRIDGE_INGEST_SECRET:?set the ingest secret}
+      BRIDGE_SHARED_SECRET: ${BRIDGE_SHARED_SECRET:?set the shared secret}
+      # --- Outbound media: read bytes from the SHARED mount, stream to Convex ---
+      # Must equal the path OpenClaw writes to (so basename resolution is trivial).
+      OPENCLAW_MEDIA_OUTBOUND_DIR: /home/node/.openclaw/media/outbound
+      OPENCLAW_MEDIA_MAX_MB: ${OPENCLAW_MEDIA_MAX_MB:-1024}
+      BRIDGE_PORT: "8787"
+    volumes:
+      # (A) shared named volume — same as the OpenClaw service mounts (read-write
+      #     there, read-only here). This is the co-located NAS topology.
+      - media-outbound:/home/node/.openclaw/media/outbound:ro
+      # (B) OR a host/NFS bind instead of the named volume above:
+      # - ${OPENCLAW_MEDIA_OUTBOUND_HOST_DIR}:/home/node/.openclaw/media/outbound:ro
+
+volumes:
+  # Declared here for self-contained local testing. On the NAS, make this the
+  # SAME volume (or NFS) the OpenClaw container(s) write their outbound media to.
+  media-outbound:
+    external: false
