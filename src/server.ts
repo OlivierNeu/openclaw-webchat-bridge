@@ -20,6 +20,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import type { BridgeConfig } from "./config.js";
 import { idempotencyKey } from "./providers/openclaw/openclaw-client.js";
+import { classifyGatewayError } from "./core/dispatch-errors.js";
 import type { ConvexWriter, SessionMetaReport } from "./convex-writer.js";
 import type { SessionRegistry, BridgeSession } from "./session.js";
 
@@ -561,8 +562,12 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       sendJson(res, 200, { ok: true });
     } catch (err) {
       // A per-send upstream failure is reported but does not crash the bridge.
-      console.error("bridge /send failed:", (err as Error)?.message ?? err);
-      sendJson(res, 502, { ok: false, error: "upstream send failed" });
+      // Classify into a stable, non-PHI code: the RAW message stays in this log
+      // only; only `error.code` crosses to Convex (the platform forbids shipping
+      // raw message text). Convex maps the code to the user/admin surfaces.
+      const code = classifyGatewayError(err);
+      console.error(`bridge /send failed [${code}]:`, (err as Error)?.message ?? err);
+      sendJson(res, 502, { ok: false, error: { code } });
     }
   }
 }
