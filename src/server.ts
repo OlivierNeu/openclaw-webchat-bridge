@@ -21,6 +21,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { BridgeConfig } from "./config.js";
 import { idempotencyKey } from "./providers/openclaw/openclaw-client.js";
 import { classifyGatewayError } from "./core/dispatch-errors.js";
+import { gatewayHostOf, type HealthRegistry, type TargetRef } from "./core/health.js";
 import type { ConvexWriter, SessionMetaReport } from "./convex-writer.js";
 import type { SessionRegistry, BridgeSession } from "./session.js";
 
@@ -466,6 +467,8 @@ async function performReset(session: BridgeSession): Promise<void> {
 export interface BridgeServerDeps {
   config: BridgeConfig;
   registry: SessionRegistry;
+  /** Tracks per-target connection health for the /health endpoint. */
+  health: HealthRegistry;
 }
 
 /**
@@ -477,7 +480,17 @@ export interface BridgeServerDeps {
  *   POST /patch   -> authenticated knob write-back (reasoning/model) from Convex
  */
 export function createBridgeServer(deps: BridgeServerDeps): Server {
-  const { config, registry } = deps;
+  const { config, registry, health } = deps;
+  // Non-secret host:port computed once; the mono-tenant target is keyed by the
+  // operator canonical and ALWAYS reports the bridge's REAL env agentId (not the
+  // body's routing claim, which the mono-tenant bridge ignores).
+  const gatewayHost = gatewayHostOf(config.openclawGatewayUrl);
+  const targetRef = (): TargetRef => ({
+    key: config.canonical,
+    canonical: config.canonical,
+    agentId: config.agentId,
+    gatewayHost,
+  });
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res).catch((err: unknown) => {
       // Never leave the dispatcher hanging; never leak gateway detail.
@@ -490,7 +503,9 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method === "GET" && req.url === "/health") {
-      sendJson(res, 200, { status: "ok" });
+      // Health is UNAUTHENTICATED on purpose (liveness + a non-secret state
+      // snapshot — codes + host only, never tokens). The Convex poller reads it.
+      sendJson(res, 200, health.snapshot());
       return;
     }
     if (
@@ -559,6 +574,7 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
     try {
       const session = await registry.acquire(body.chatId, body.openclawChatId);
       await performSend(session, body, registry.getWriter());
+      health.recordOk(targetRef()); // a real send proves connection + agent
       sendJson(res, 200, { ok: true });
     } catch (err) {
       // A per-send upstream failure is reported but does not crash the bridge.
@@ -566,6 +582,7 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       // only; only `error.code` crosses to Convex (the platform forbids shipping
       // raw message text). Convex maps the code to the user/admin surfaces.
       const code = classifyGatewayError(err);
+      health.recordError(targetRef(), code); // surfaces in /health for the poller
       console.error(`bridge /send failed [${code}]:`, (err as Error)?.message ?? err);
       sendJson(res, 502, { ok: false, error: { code } });
     }

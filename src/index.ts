@@ -9,6 +9,7 @@
 import { loadConfig } from "./config.js";
 import { HttpConvexWriter } from "./convex-writer.js";
 import { LocalDirMediaFetcher } from "./core/media-fetcher.js";
+import { HealthRegistry } from "./core/health.js";
 import { SessionRegistry } from "./session.js";
 import { createBridgeServer } from "./server.js";
 
@@ -29,7 +30,8 @@ function main(): void {
     mediaFetcher,
   });
   const registry = new SessionRegistry(config, writer);
-  const server = createBridgeServer({ config, registry });
+  const health = new HealthRegistry(Date.now());
+  const server = createBridgeServer({ config, registry, health });
 
   server.listen(config.port, () => {
     console.log(`bridge listening on :${config.port}`);
