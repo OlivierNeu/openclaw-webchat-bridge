@@ -16,33 +16,51 @@ import {
 } from "../src/server.js";
 
 describe("parsePatchBody", () => {
+  // Every body now carries the per-turn routing (agentId + canonical) Convex
+  // resolves; the parser requires it (no env fallback — Phase 2 prod fix).
+  const R = { agentId: "olivier", canonical: "alice" };
+
   it("parses a reasoning-only patch", () => {
     const body = parsePatchBody(
-      JSON.stringify({ chatId: "c1", openclawChatId: "oc1", thinkingLevel: "low" }),
+      JSON.stringify({ chatId: "c1", openclawChatId: "oc1", thinkingLevel: "low", ...R }),
     );
     expect(body).toEqual({
       chatId: "c1",
       openclawChatId: "oc1",
       thinkingLevel: "low",
       model: null,
+      agentId: "olivier",
+      canonical: "alice",
+      instanceName: null,
     });
   });
 
   it("parses a model-only patch", () => {
-    const body = parsePatchBody(JSON.stringify({ chatId: "c1", model: "gpt-5.5" }));
+    const body = parsePatchBody(JSON.stringify({ chatId: "c1", model: "gpt-5.5", ...R }));
     expect(body).toMatchObject({ chatId: "c1", model: "gpt-5.5", thinkingLevel: null });
     expect(body?.openclawChatId).toBeNull();
   });
 
   it("rejects a body with NO knob (nothing to patch)", () => {
-    expect(parsePatchBody(JSON.stringify({ chatId: "c1" }))).toBeNull();
+    expect(parsePatchBody(JSON.stringify({ chatId: "c1", ...R }))).toBeNull();
     expect(
-      parsePatchBody(JSON.stringify({ chatId: "c1", thinkingLevel: "", model: "" })),
+      parsePatchBody(JSON.stringify({ chatId: "c1", thinkingLevel: "", model: "", ...R })),
     ).toBeNull();
   });
 
   it("rejects a body missing chatId", () => {
-    expect(parsePatchBody(JSON.stringify({ thinkingLevel: "low" }))).toBeNull();
+    expect(parsePatchBody(JSON.stringify({ thinkingLevel: "low", ...R }))).toBeNull();
+  });
+
+  it("rejects a body missing routing (agentId/canonical) — no env fallback", () => {
+    expect(
+      parsePatchBody(JSON.stringify({ chatId: "c1", thinkingLevel: "low" })),
+    ).toBeNull();
+    expect(
+      parsePatchBody(
+        JSON.stringify({ chatId: "c1", thinkingLevel: "low", agentId: "olivier" }),
+      ),
+    ).toBeNull(); // canonical still missing
   });
 
   it("rejects invalid JSON and non-objects", () => {
@@ -53,7 +71,7 @@ describe("parsePatchBody", () => {
 
   it("ignores non-string knob values (defensive)", () => {
     const body = parsePatchBody(
-      JSON.stringify({ chatId: "c1", thinkingLevel: 3, model: "gpt-5.5" }),
+      JSON.stringify({ chatId: "c1", thinkingLevel: 3, model: "gpt-5.5", ...R }),
     );
     expect(body).toMatchObject({ thinkingLevel: null, model: "gpt-5.5" });
   });

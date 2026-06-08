@@ -35,8 +35,10 @@ services:
       OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:?set the gateway WS URL}
       OPENCLAW_TOKEN: ${OPENCLAW_TOKEN:?set the operator token}
       OPENCLAW_DEVICE_IDENTITY: ${OPENCLAW_DEVICE_IDENTITY:?set the device identity JSON}
-      OPENCLAW_CANONICAL: ${OPENCLAW_CANONICAL:?set the canonical operator segment}
-      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      # Instance this bridge serves (M2 guard). MUST equal Convex `instances.name`
+      # + BRIDGE_INSTANCE_NAME. agentId/canonical are routed per-turn from the body
+      # (no more OPENCLAW_AGENT_ID — that static env was the prod-bug root cause).
+      OPENCLAW_INSTANCE_NAME: ${OPENCLAW_INSTANCE_NAME:-}
       # --- Convex ingest (self-hosted: use the .site origin / service name) ---
       CONVEX_HTTP_ACTIONS_URL: ${CONVEX_HTTP_ACTIONS_URL:?set the Convex .site origin}
       BRIDGE_INGEST_SECRET: ${BRIDGE_INGEST_SECRET:?set the ingest secret}

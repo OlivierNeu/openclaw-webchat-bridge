@@ -21,6 +21,19 @@ export type Clock = () => number;
 
 const defaultClock: Clock = () => Date.now() / 1000;
 
+/**
+ * Per-turn routing the registry needs to build the gateway session key. `agentId`
+ * and `canonical` are routed FROM THE REQUEST BODY (Convex resolves the discovered
+ * agent + the per-user canonical) — never a static bridge env. This is the fix for
+ * the "Agent <env-id> no longer exists" production bug.
+ */
+export interface SessionRouting {
+  chatId: string;
+  openclawChatId: string | null;
+  agentId: string;
+  canonical: string;
+}
+
 export interface BridgeSession {
   readonly chatId: string;
   readonly sessionKey: string;
@@ -159,30 +172,41 @@ export class SessionRegistry {
     return this.writer;
   }
 
-  async acquire(chatId: string, openclawChatId: string | null): Promise<BridgeSession> {
+  async acquire(routing: SessionRouting): Promise<BridgeSession> {
+    const { chatId, openclawChatId, agentId, canonical } = routing;
+    // The session key is derived from THIS turn's routed agent + canonical, so a
+    // rebind (deleted agent → default = new agentId, or a changed canonical)
+    // yields a DIFFERENT key. We keep at most one live connection per chatId; if
+    // the key changed we must close the stale one (else its consumer loop keeps
+    // writing to the same chat under the old agent → leak + cross-write).
+    const sessionKey = buildSessionKey(openclawChatId ?? chatId, agentId, canonical);
+
     const existing = this.sessions.get(chatId);
-    if (existing && !existing.connection.isClosed) {
+    if (existing && !existing.connection.isClosed && existing.sessionKey === sessionKey) {
       return existing;
     }
-    // A closed/missing session: drop it and (re)connect, deduping concurrent
-    // acquisitions for the same chat.
+    // A closed, missing, OR re-keyed session: drop (closing if still open) and
+    // (re)connect, deduping concurrent acquisitions for the same chat.
     if (existing) {
+      if (!existing.connection.isClosed) existing.close();
       this.sessions.delete(chatId);
     }
     const pending = this.inflight.get(chatId);
     if (pending) {
-      return pending;
+      // Honor an in-flight create only if it targets the SAME key; otherwise wait
+      // for it to settle, then recurse so the re-key is applied.
+      return pending.then((s) =>
+        s.sessionKey === sessionKey ? s : this.acquire(routing),
+      );
     }
-    const promise = this.create(chatId, openclawChatId).finally(() => {
+    const promise = this.create(chatId, sessionKey).finally(() => {
       this.inflight.delete(chatId);
     });
     this.inflight.set(chatId, promise);
     return promise;
   }
 
-  private async create(chatId: string, openclawChatId: string | null): Promise<Session> {
-    const routingId = openclawChatId ?? chatId;
-    const sessionKey = buildSessionKey(routingId, this.config.agentId, this.config.canonical);
+  private async create(chatId: string, sessionKey: string): Promise<Session> {
     const connection = await OpenClawConnection.connect(
       this.config.openclawGatewayUrl,
       this.config.openclawToken,

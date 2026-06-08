@@ -25,10 +25,20 @@ export interface BridgeConfig {
   openclawToken: string;
   /** Ed25519 device identity (id + publicKey + PEM privateKey). */
   deviceIdentity: DeviceIdentity;
-  /** Agent id segment of the gateway session key (e.g. "main"). */
-  agentId: string;
-  /** Canonical operator segment of the gateway session key (e.g. "olivier"). */
-  canonical: string;
+  /**
+   * The instance NAME this bridge serves. Must equal the Convex `instances.name`
+   * row that maps to this bridge's BRIDGE_URL (and the poller's
+   * BRIDGE_INSTANCE_NAME). OPTIONAL: when set, `/send|/patch|/reset` reject a
+   * body whose `instanceName` differs (M2 guard — catch a Convex routing
+   * misconfig loudly instead of answering from the wrong gateway). When null the
+   * check is skipped (opt-in).
+   *
+   * NOTE: the agent id and operator canonical are NO LONGER configuration — they
+   * are routed PER-TURN from the request body (Convex resolves the discovered
+   * agent + the per-user canonical). Sourcing the agent id from a static env was
+   * the root cause of the "Agent <env-id> no longer exists" production bug.
+   */
+  instanceName: string | null;
   /**
    * Base directory the gateway writes outbound media into. The normalizer only
    * ever surfaces paths under `<dir>/...`; we read bytes from here to upload
@@ -83,6 +93,12 @@ function requireEnv(name: string): string {
 function optionalEnv(name: string, fallback: string): string {
   const value = (process.env[name] ?? "").trim();
   return value || fallback;
+}
+
+/** Optional env that stays `null` when unset (no silent default). */
+function optionalEnvOrNull(name: string): string | null {
+  const value = (process.env[name] ?? "").trim();
+  return value || null;
 }
 
 function parseIntEnv(name: string, fallback: number): number {
@@ -146,8 +162,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
       openclawGatewayUrl: requireEnv("OPENCLAW_GATEWAY_URL"),
       openclawToken: requireEnv("OPENCLAW_TOKEN"),
       deviceIdentity: loadDeviceIdentity(),
-      agentId: optionalEnv("OPENCLAW_AGENT_ID", "main"),
-      canonical: requireEnv("OPENCLAW_CANONICAL"),
+      instanceName: optionalEnvOrNull("OPENCLAW_INSTANCE_NAME"),
       mediaOutboundDir: optionalEnv(
         "OPENCLAW_MEDIA_OUTBOUND_DIR",
         "/home/node/.openclaw/media/outbound",

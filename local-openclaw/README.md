@@ -31,8 +31,9 @@ overrides to run the bridge (the repo root, `..`) against this local gateway.
 `up.sh` makes the agent work for FREE on your local codex login (no OpenAI API
 auth, no pay-per-token). It auto-injects, if `~/.codex/auth.json` exists:
 - `seed/openclaw.json` — the NAS olivier config stripped of NAS-only sections →
-  agent **`olivier`** (matches the bridge `OPENCLAW_AGENT_ID`), model
-  `openai/gpt-5.5`, **codex runtime (harness)**.
+  agent **`olivier`** (the bridge routes the agent per-turn from the request body
+  now, so any discovered agent id works), model `openai/gpt-5.5`,
+  **codex runtime (harness)**.
 - your `~/.codex/auth.json` (copied node-owned into the volume) → OpenClaw spawns
   the local **codex app-server** reusing your ChatGPT session.
 - `codex-yolo-wrapper.sh` (bind-mounted via compose, pointed to by

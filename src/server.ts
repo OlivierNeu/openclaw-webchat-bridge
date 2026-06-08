@@ -19,11 +19,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { timingSafeEqual } from "node:crypto";
 
 import type { BridgeConfig } from "./config.js";
-import { idempotencyKey } from "./providers/openclaw/openclaw-client.js";
+import { idempotencyKey, OpenClawConnection } from "./providers/openclaw/openclaw-client.js";
 import { classifyGatewayError } from "./core/dispatch-errors.js";
 import { gatewayHostOf, type HealthRegistry, type TargetRef } from "./core/health.js";
 import type { ConvexWriter, SessionMetaReport } from "./convex-writer.js";
-import type { SessionRegistry, BridgeSession } from "./session.js";
+import type { SessionRegistry, BridgeSession, SessionRouting } from "./session.js";
 
 /** Per-chat OpenClaw knob intent (reasoning level / model). Non-secret. */
 interface SessionSettings {
@@ -31,7 +31,19 @@ interface SessionSettings {
   model?: string | null;
 }
 
-interface SendBody {
+/**
+ * Per-turn routing resolved by Convex and carried in EVERY body. `agentId` and
+ * `canonical` are REQUIRED — there is deliberately NO env fallback (a fallback to
+ * a static agent id is exactly the "Agent <env-id> no longer exists" prod bug).
+ * `instanceName` (optional) is checked against the bridge's declared instance.
+ */
+interface BodyRouting {
+  agentId: string;
+  canonical: string;
+  instanceName: string | null;
+}
+
+interface SendBody extends BodyRouting {
   chatId: string;
   openclawChatId: string | null;
   text: string;
@@ -44,7 +56,7 @@ interface SendBody {
 }
 
 /** Inbound body for the immediate knob write-back (`POST /patch`). */
-interface PatchBody {
+interface PatchBody extends BodyRouting {
   chatId: string;
   openclawChatId: string | null;
   thinkingLevel: string | null;
@@ -52,7 +64,7 @@ interface PatchBody {
 }
 
 /** Inbound body for a session reset (`POST /reset`). */
-interface ResetBody {
+interface ResetBody extends BodyRouting {
   chatId: string;
   openclawChatId: string | null;
 }
@@ -94,7 +106,51 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-function parseSendBody(raw: string): SendBody | null {
+/**
+ * Extract the per-turn routing. `agentId` + `canonical` are REQUIRED (returns
+ * null if absent) — no env fallback, by design (see BodyRouting). `instanceName`
+ * is optional. Exported for tests.
+ */
+export function parseBodyRouting(obj: Record<string, unknown>): BodyRouting | null {
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.length > 0 ? v : null;
+  const agentId = str(obj.agentId);
+  const canonical = str(obj.canonical);
+  if (!agentId || !canonical) return null;
+  return { agentId, canonical, instanceName: str(obj.instanceName) };
+}
+
+/**
+ * M2 guard: when the bridge DECLARES the instance it serves
+ * (OPENCLAW_INSTANCE_NAME), refuse a body that claims a DIFFERENT one — a Convex
+ * routing misconfig must fail LOUDLY rather than answer from the wrong gateway.
+ * Skipped (returns false) when the bridge declares no instance, or the body omits
+ * one (cannot compare). Exported for tests.
+ */
+export function isInstanceMismatch(
+  servedInstance: string | null,
+  bodyInstanceName: string | null,
+): boolean {
+  return (
+    servedInstance !== null &&
+    bodyInstanceName !== null &&
+    bodyInstanceName !== servedInstance
+  );
+}
+
+/** Project any inbound body onto the session registry's routing shape. */
+function toRouting(
+  b: BodyRouting & { chatId: string; openclawChatId: string | null },
+): SessionRouting {
+  return {
+    chatId: b.chatId,
+    openclawChatId: b.openclawChatId,
+    agentId: b.agentId,
+    canonical: b.canonical,
+  };
+}
+
+export function parseSendBody(raw: string): SendBody | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -111,7 +167,10 @@ function parseSendBody(raw: string): SendBody | null {
   if (typeof obj.clientMessageId !== "string") {
     return null;
   }
+  const routing = parseBodyRouting(obj);
+  if (routing === null) return null;
   return {
+    ...routing,
     chatId: obj.chatId,
     openclawChatId: typeof obj.openclawChatId === "string" ? obj.openclawChatId : null,
     text: obj.text,
@@ -133,7 +192,10 @@ export function parseResetBody(raw: string): ResetBody | null {
   if (typeof parsed !== "object" || parsed === null) return null;
   const obj = parsed as Record<string, unknown>;
   if (typeof obj.chatId !== "string") return null;
+  const routing = parseBodyRouting(obj);
+  if (routing === null) return null;
   return {
+    ...routing,
     chatId: obj.chatId,
     openclawChatId: typeof obj.openclawChatId === "string" ? obj.openclawChatId : null,
   };
@@ -169,7 +231,10 @@ export function parsePatchBody(raw: string): PatchBody | null {
   const model = str(obj.model);
   // At least one knob must be present, else there is nothing to patch.
   if (!thinkingLevel && !model) return null;
+  const routing = parseBodyRouting(obj);
+  if (routing === null) return null;
   return {
+    ...routing,
     chatId: obj.chatId,
     openclawChatId: typeof obj.openclawChatId === "string" ? obj.openclawChatId : null,
     thinkingLevel,
@@ -464,6 +529,114 @@ async function performReset(session: BridgeSession): Promise<void> {
   conn.verboseFullApplied = false;
 }
 
+// --- Agent discovery (provider-agnostic, normalized for the app) -------------
+
+/** A normalized, provider-agnostic agent descriptor for the `/agents` API. The
+ *  bridge absorbs OpenClaw/Hermes + version field-name drift HERE so the app (and
+ *  the `agents` Convex cache) depend on ONE stable shape. */
+export interface NormalizedAgent {
+  agentId: string;
+  displayName: string | null;
+  emoji: string | null;
+  model: string | null;
+  isDefaultOnInstance: boolean;
+  raw: unknown;
+}
+
+function asNonEmptyString(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/** Flatten one OpenClaw `agents.list` entry. Tolerant of 5.19/6.1 + CLI/RPC drift
+ *  (LIVE-captured 6.1 RPC shape: `id`, `name`, `identity.{name,emoji}`,
+ *  `model.primary`, default via the LIST-level `defaultId` — NOT a per-agent flag).
+ *  Handles: id|agentId, identityName|name|identity.name, identityEmoji|identity.emoji,
+ *  model string|{primary}, per-agent isDefault|default OR list-level `defaultId`.
+ *  Returns null on an idless/shapeless entry. */
+export function normalizeOpenClawAgent(
+  raw: unknown,
+  defaultId?: string | null,
+): NormalizedAgent | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  const agentId = asNonEmptyString(o.id) ?? asNonEmptyString(o.agentId);
+  if (!agentId) return null;
+  const identity =
+    typeof o.identity === "object" && o.identity !== null
+      ? (o.identity as Record<string, unknown>)
+      : null;
+  const displayName =
+    asNonEmptyString(o.identityName) ??
+    asNonEmptyString(o.name) ??
+    (identity ? asNonEmptyString(identity.name) : null);
+  const emoji =
+    asNonEmptyString(o.identityEmoji) ??
+    (identity ? asNonEmptyString(identity.emoji) : null);
+  const model =
+    asNonEmptyString(o.model) ??
+    (typeof o.model === "object" && o.model !== null
+      ? asNonEmptyString((o.model as Record<string, unknown>).primary)
+      : null);
+  const isDefaultOnInstance =
+    o.isDefault === true ||
+    o.default === true ||
+    (defaultId != null && agentId === defaultId);
+  return { agentId, displayName, emoji, model, isDefaultOnInstance, raw };
+}
+
+/** Open a SHORT-LIVED operator connection, call `agents.list`, normalize, close.
+ *  Dedicated (not a registry session) so it never starts a normalizer consumer or
+ *  pollutes the per-chat session map. Mono-tenant: uses the configured gateway. */
+async function discoverAgents(
+  config: BridgeConfig,
+): Promise<{ agents: NormalizedAgent[]; rawCount: number }> {
+  const conn = await OpenClawConnection.connect(
+    config.openclawGatewayUrl,
+    config.openclawToken,
+    config.deviceIdentity,
+  );
+  try {
+    const res = (await conn.request("agents.list", {}, 10_000)) as {
+      payload?: unknown;
+    };
+    const payload = res?.payload ?? res;
+    const list = Array.isArray(payload)
+      ? payload
+      : Array.isArray((payload as { agents?: unknown })?.agents)
+        ? (payload as { agents: unknown[] }).agents
+        : [];
+    // 6.1 RPC marks the default via a LIST-level `defaultId`, not a per-agent flag.
+    const defaultId = asNonEmptyString(
+      (payload as { defaultId?: unknown })?.defaultId,
+    );
+    const agents = list
+      .map((raw) => normalizeOpenClawAgent(raw, defaultId))
+      .filter((a): a is NormalizedAgent => a !== null);
+    // `rawCount` = how many entries the gateway returned BEFORE normalization. The
+    // Convex poller uses it to tell a GENUINELY empty gateway (rawCount 0 → a real
+    // "all agents deleted", apply it) from shape-drift (rawCount > 0 but all
+    // dropped by the normalizer → fail-closed, keep last-good). See agents cache.
+    return { agents, rawCount: list.length };
+  } finally {
+    conn.close();
+  }
+}
+
+/** Static provider capabilities for a mono-tenant OpenClaw bridge. Mirrors the
+ *  ground truth in docs/OPENCLAW_RESEARCH.md (abort synthesized, no chat.history).
+ *  Phase 2 sources this per-instance from the provider abstraction. */
+function openclawCapabilities() {
+  return {
+    kind: "openclaw" as const,
+    agentDiscovery: true,
+    abort: false,
+    history: false,
+    attachments: true,
+    media: true,
+    streaming: "both" as const,
+  };
+}
+
 export interface BridgeServerDeps {
   config: BridgeConfig;
   registry: SessionRegistry;
@@ -481,15 +654,17 @@ export interface BridgeServerDeps {
  */
 export function createBridgeServer(deps: BridgeServerDeps): Server {
   const { config, registry, health } = deps;
-  // Non-secret host:port computed once; the mono-tenant target is keyed by the
-  // operator canonical and ALWAYS reports the bridge's REAL env agentId (not the
-  // body's routing claim, which the mono-tenant bridge ignores).
+  // Non-secret host:port computed once. The health target now reflects the
+  // ROUTED identity (the agent/canonical from the body we actually dispatched to)
+  // — honest liveness, no longer a static env claim. Keyed by canonical so the
+  // entry count stays bounded on a mono-instance bridge.
   const gatewayHost = gatewayHostOf(config.openclawGatewayUrl);
-  const targetRef = (): TargetRef => ({
-    key: config.canonical,
-    canonical: config.canonical,
-    agentId: config.agentId,
+  const targetRef = (agentId: string, canonical: string): TargetRef => ({
+    key: canonical,
+    canonical,
+    agentId,
     gatewayHost,
+    instanceName: config.instanceName,
   });
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res).catch((err: unknown) => {
@@ -508,6 +683,53 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       sendJson(res, 200, health.snapshot());
       return;
     }
+
+    if (req.method === "GET" && req.url === "/capabilities") {
+      // Non-secret provider capability descriptor (incl. agentDiscovery). The app
+      // caches this to adapt its UI per provider. Unauthenticated like /health.
+      sendJson(res, 200, {
+        // The instance this bridge serves (null when undeclared). The app caches
+        // this to correlate capabilities + the M2 routing guard.
+        instanceName: config.instanceName,
+        capabilities: openclawCapabilities(),
+      });
+      return;
+    }
+
+    if (req.method === "GET" && (req.url === "/agents" || req.url?.startsWith("/agents?"))) {
+      // Bridge-driven agent discovery. Authenticated (it opens a gateway
+      // connection) with the shared secret, like /send. Returns NORMALIZED,
+      // non-secret agent descriptors; the app caches them as the bind whitelist.
+      const provided = req.headers["authorization"];
+      if (typeof provided !== "string" || !constantTimeEqual(provided, config.bridgeSharedSecret)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      // mono-tenant: `?instance` is echoed for the poller's convenience but the
+      // single configured gateway is always used.
+      const instanceName = new URL(req.url ?? "/agents", "http://bridge").searchParams.get(
+        "instance",
+      );
+      try {
+        const { agents, rawCount } = await discoverAgents(config);
+        // `count` (raw gateway agent count) lets the Convex poller distinguish a
+        // genuinely empty gateway from normalizer shape-drift (agents cache P2).
+        sendJson(res, 200, {
+          ok: true,
+          instanceName,
+          agents,
+          count: rawCount,
+          capturedAt: Date.now(),
+        });
+      } catch (err) {
+        // Classify into a stable non-PHI code; raw detail stays in this log only.
+        const code = classifyGatewayError(err);
+        console.error(`bridge /agents failed [${code}]:`, (err as Error)?.message ?? err);
+        sendJson(res, 502, { ok: false, error: { code } });
+      }
+      return;
+    }
+
     if (
       req.method !== "POST" ||
       (req.url !== "/send" && req.url !== "/patch" && req.url !== "/reset")
@@ -537,8 +759,12 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         sendJson(res, 400, { ok: false, error: "invalid body" });
         return;
       }
+      if (isInstanceMismatch(config.instanceName, patch.instanceName)) {
+        sendJson(res, 409, { ok: false, error: { code: "instance_mismatch" } });
+        return;
+      }
       try {
-        const session = await registry.acquire(patch.chatId, patch.openclawChatId);
+        const session = await registry.acquire(toRouting(patch));
         await performPatch(session, patch, registry.getWriter());
         sendJson(res, 200, { ok: true });
       } catch (err) {
@@ -554,8 +780,12 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         sendJson(res, 400, { ok: false, error: "invalid body" });
         return;
       }
+      if (isInstanceMismatch(config.instanceName, reset.instanceName)) {
+        sendJson(res, 409, { ok: false, error: { code: "instance_mismatch" } });
+        return;
+      }
       try {
-        const session = await registry.acquire(reset.chatId, reset.openclawChatId);
+        const session = await registry.acquire(toRouting(reset));
         await performReset(session);
         sendJson(res, 200, { ok: true });
       } catch (err) {
@@ -570,11 +800,27 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       sendJson(res, 400, { ok: false, error: "invalid body" });
       return;
     }
+    if (isInstanceMismatch(config.instanceName, body.instanceName)) {
+      // A Convex routing misconfig (claims an instance this bridge does not
+      // serve) — refuse loudly with a curated code, never answer from the wrong
+      // gateway. Convex surfaces it as a failed dispatch (errorCode).
+      sendJson(res, 409, { ok: false, error: { code: "instance_mismatch" } });
+      return;
+    }
+
+    // Non-PHI routed-target record (agent/instance/canonical/chat are non-secret
+    // names — never the text/token): the operational "which agent did this turn
+    // route to" line, and the live-e2e discriminator for the body-routing fix.
+    console.log(
+      `bridge /send routed instance=${body.instanceName ?? config.instanceName ?? "-"} ` +
+        `agent=${body.agentId} canonical=${body.canonical} chat=${body.chatId}`,
+    );
 
     try {
-      const session = await registry.acquire(body.chatId, body.openclawChatId);
+      const session = await registry.acquire(toRouting(body));
       await performSend(session, body, registry.getWriter());
-      health.recordOk(targetRef()); // a real send proves connection + agent
+      // A real send proves connection + the ROUTED agent answered.
+      health.recordOk(targetRef(body.agentId, body.canonical));
       sendJson(res, 200, { ok: true });
     } catch (err) {
       // A per-send upstream failure is reported but does not crash the bridge.
@@ -582,7 +828,7 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       // only; only `error.code` crosses to Convex (the platform forbids shipping
       // raw message text). Convex maps the code to the user/admin surfaces.
       const code = classifyGatewayError(err);
-      health.recordError(targetRef(), code); // surfaces in /health for the poller
+      health.recordError(targetRef(body.agentId, body.canonical), code);
       console.error(`bridge /send failed [${code}]:`, (err as Error)?.message ?? err);
       sendJson(res, 502, { ok: false, error: { code } });
     }
