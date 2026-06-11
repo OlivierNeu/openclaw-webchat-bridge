@@ -27,10 +27,54 @@ import type { ConvexWriter } from "../../convex-writer.js";
 export class RunManager {
   private readonly normalizer: Normalizer;
   private readonly sink: TurnSink;
+  // DIAGNOSTIC (streaming-lag investigation): per-turn tally of the raw frame
+  // SHAPES the gateway delivered (type/event/state/has-delta/has-message), plus
+  // a one-time 300-char sample per shape. Bounded: one line per NEW shape + one
+  // summary per turn — this is what separates "the gateway never sent deltas"
+  // from "the normalizer dropped them".
+  private frameTally = new Map<string, number>();
+  private frameSampled = new Set<string>();
+  private tallyDumped = false;
 
   constructor(chatId: string, sessionKey: string, writer: ConvexWriter) {
     this.normalizer = new Normalizer(sessionKey);
     this.sink = new TurnSink(chatId, writer);
+  }
+
+  private tallyFrame(frame: unknown): void {
+    if (typeof frame !== "object" || frame === null) return;
+    const f = frame as Record<string, unknown>;
+    const payload =
+      typeof f.payload === "object" && f.payload !== null
+        ? (f.payload as Record<string, unknown>)
+        : {};
+    const key = [
+      String(f.type ?? "?"),
+      String(f.event ?? "-"),
+      typeof payload.state === "string" ? payload.state : "-",
+      typeof payload.deltaText === "string" && payload.deltaText ? "delta" : "-",
+      payload.message !== undefined ? "msg" : "-",
+    ].join("/");
+    this.frameTally.set(key, (this.frameTally.get(key) ?? 0) + 1);
+    if (!this.frameSampled.has(key)) {
+      this.frameSampled.add(key);
+      let sample = "";
+      try {
+        sample = JSON.stringify(frame).slice(0, 300);
+      } catch {
+        sample = "<unserializable>";
+      }
+      console.log(`[frames] first shape ${key}: ${sample}`);
+    }
+  }
+
+  private dumpTallyOnce(): void {
+    if (this.tallyDumped || !this.normalizer.finalized) return;
+    this.tallyDumped = true;
+    const parts = [...this.frameTally.entries()]
+      .map(([k, n]) => `${k}=${n}`)
+      .join(" | ");
+    console.log(`[frames] turn summary: ${parts || "(no frames)"}`);
   }
 
   /** Seconds until the normalizer's nearest deadline (null = idle). */
@@ -49,6 +93,9 @@ export class RunManager {
    */
   async beginTurn(now: number, ackRunId: string | null): Promise<void> {
     this.normalizer.beginTurn(now);
+    this.frameTally.clear();
+    this.frameSampled.clear();
+    this.tallyDumped = false;
     if (ackRunId) {
       this.normalizer.noteRunStarted(ackRunId, now);
     }
@@ -60,7 +107,9 @@ export class RunManager {
     if (!this.sink.active) {
       return;
     }
+    this.tallyFrame(frame);
     await this.sink.apply(this.normalizer.feed(frame, now));
+    this.dumpTallyOnce();
   }
 
   /** Resolve expired normalizer deadlines; apply any emitted events. */

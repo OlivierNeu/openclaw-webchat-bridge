@@ -10,9 +10,12 @@ set -uo pipefail
 cd "$(dirname "$0")"
 VERSION="${1:?usage: ./test-fileexchange.sh <openclaw-version>}"
 REPO="$(cd .. && pwd)"
-CHAT="${FX_CHAT:-jx7f3yr4ctbr8fzp0kswjxx9f1883d6e}"
+# Convex CLI runs from the WEBCHAT repo (bridge extracted in C3, no convex dep).
+WEBCHAT="${WEBCHAT_DIR:-$(cd ../../openclaw-webchat && pwd)}"
+cvx() { (cd "$WEBCHAT" && npx convex run "$@"); }
+CHAT="${FX_CHAT:-jx7f3n01v12282cqb9wanp0xex88ejqz}"
 MEDIA_DIR="$(pwd)/media-outbound"
-PORT=18789
+PORT=18790
 fail(){ echo "❌ FAIL [$VERSION]: $1"; exit 1; }
 jq_field(){ python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('$1','') if d else '')"; }
 
@@ -41,12 +44,12 @@ P="/home/node/.openclaw/media/outbound/$FN"
 PROMPT="Écris un fichier directement à $P contenant exactement 3 lignes de liste markdown: - alpha / - beta / - gamma. Puis termine ta réponse par une ligne contenant EXACTEMENT: MEDIA:$P"
 cd "$REPO"
 ARGS=$(python3 -c "import json,sys;print(json.dumps({'chatId':sys.argv[1],'text':sys.argv[2]}))" "$CHAT" "$PROMPT")
-npx convex run dev:testSend "$ARGS" >/dev/null 2>&1 || fail "testSend failed"
+cvx dev:testSend "$ARGS" >/dev/null 2>&1 || fail "testSend failed"
 
 # 4) poll for the media part (codex turn ~20-60s).
 RES=""
 for _ in $(seq 1 40); do
-  RES=$(npx convex run dev:lastMediaPart "{\"chatId\":\"$CHAT\"}" 2>/dev/null)
+  RES=$(cvx dev:lastMediaPart "{\"chatId\":\"$CHAT\"}" 2>/dev/null)
   echo "$RES" | grep -q "$FN" && break
   sleep 5
 done

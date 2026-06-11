@@ -12,8 +12,12 @@ cd "$(dirname "$0")"
 VERSION="${1:?usage: ./test-stability.sh <version> [N]}"
 N="${2:-6}"
 REPO="$(cd .. && pwd)"
-CHAT="${FX_CHAT:-jx7f3yr4ctbr8fzp0kswjxx9f1883d6e}"
-PORT=18789
+# The convex CLI must run from the WEBCHAT repo (the bridge was extracted to its
+# own repo in C3 and no longer carries the convex dependency / deployment config).
+WEBCHAT="${WEBCHAT_DIR:-$(cd ../../openclaw-webchat && pwd)}"
+cvx() { (cd "$WEBCHAT" && npx convex run "$@"); }
+CHAT="${FX_CHAT:-jx7f3n01v12282cqb9wanp0xex88ejqz}"
+PORT=18790
 
 echo "════════ stability — OpenClaw $VERSION — $N turns ════════"
 ./reset.sh >/dev/null 2>&1 || true
@@ -38,13 +42,13 @@ if lc>before and lr=="assistant" and ls in ("complete","error"):
 else: print("")'
 complete=0; error=0; timeout=0; ERRS=""
 for i in $(seq 1 "$N"); do
-  before=$(npx convex run dev:chatStats "{\"chatId\":\"$CHAT\"}" 2>/dev/null | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('lastCreated',0))")
+  before=$(cvx dev:chatStats "{\"chatId\":\"$CHAT\"}" 2>/dev/null | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('lastCreated',0))")
   PROMPT="Écris un court fichier markdown nommé stab-$i.md (3 lignes de liste) dans ton workspace, puis confirme en une phrase."
   ARGS=$(python3 -c "import json,sys;print(json.dumps({'chatId':sys.argv[1],'text':sys.argv[2]}))" "$CHAT" "$PROMPT")
-  npx convex run dev:testSend "$ARGS" >/dev/null 2>&1 || true
+  cvx dev:testSend "$ARGS" >/dev/null 2>&1 || true
   st=""
   for _ in $(seq 1 45); do
-    OUT=$(npx convex run dev:chatStats "{\"chatId\":\"$CHAT\"}" 2>/dev/null | python3 -c "$terminal_of" "${before:-0}")
+    OUT=$(cvx dev:chatStats "{\"chatId\":\"$CHAT\"}" 2>/dev/null | python3 -c "$terminal_of" "${before:-0}")
     [ -n "$OUT" ] && { st="$OUT"; break; }
     sleep 4
   done
