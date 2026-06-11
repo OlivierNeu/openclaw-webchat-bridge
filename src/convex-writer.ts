@@ -268,14 +268,24 @@ export class HttpConvexWriter implements ConvexWriter {
       clearTimeout(timer);
       this.flushTimer.delete(messageId);
     }
+    const enqueuedAt = Date.now();
     const run = this.chain.then(async () => {
       const text = this.pendingDelta.get(messageId);
       this.pendingDelta.delete(messageId);
       if (text === undefined || text === "") {
         return; // everything already carried by an earlier flush — no POST
       }
+      const waitedMs = Date.now() - enqueuedAt;
+      const postStart = Date.now();
       try {
         await this.doPost({ op: "appendDelta", messageId, text });
+        // Per-flush timing (~1 line per backend round-trip while streaming): the
+        // production diagnostic that separates "backend slow" (high postMs),
+        // "queue starved" (high waitedMs) and "gateway delivered late" (no flush
+        // lines at all during the silent window) without dashboard access.
+        console.log(
+          `[stream] flush msg=${messageId} bytes=${text.length} waitedMs=${waitedMs} postMs=${Date.now() - postStart}`,
+        );
       } catch (err) {
         // Re-buffer the UNSENT text (PREPEND — deltas may have arrived since) so
         // a transient ingest failure loses nothing; the next flush retries.
@@ -389,7 +399,13 @@ export class HttpConvexWriter implements ConvexWriter {
     error: string | null,
   ): Promise<void> {
     await this.flushDelta(messageId); // never strand buffered deltas behind final
+    const postStart = Date.now();
     await this.post({ op: "finalize", messageId, status, text, error });
+    // The finalize is the LAST write (it stamps the message's updatedAt) — its
+    // wall-clock here vs the gateway's turn end is the end-to-end lag readout.
+    console.log(
+      `[stream] finalize msg=${messageId} status=${status} bytes=${text.length} postMs=${Date.now() - postStart}`,
+    );
   }
 
   async getRehydrationContext(
