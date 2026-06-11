@@ -237,7 +237,14 @@ export class HttpConvexWriter implements ConvexWriter {
       return; // a flush is already scheduled
     }
     const timer = setTimeout(() => {
-      void this.flushDelta(messageId);
+      // A failed timer-fired flush must NEVER surface as an unhandled rejection
+      // (which would kill the bridge process); the error is logged and the next
+      // flush retries with the (still-buffered + newer) text.
+      this.flushDelta(messageId).catch((err) => {
+        console.warn(
+          `[stream] delta flush failed for ${messageId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
     }, this.deltaFlushMs);
     // Do not keep the process alive solely for a pending flush.
     if (typeof timer.unref === "function") {
@@ -246,20 +253,42 @@ export class HttpConvexWriter implements ConvexWriter {
     this.flushTimer.set(messageId, timer);
   }
 
-  /** Flush the coalesced delta buffer for a message as a single appendDelta. */
-  private async flushDelta(messageId: string): Promise<void> {
+  /** Flush the coalesced delta buffer for a message as a single appendDelta.
+   *
+   * BACKPRESSURE-ADAPTIVE: the buffer is captured at CHAIN-EXECUTION time, not at
+   * timer-fire time. While an earlier op is still in flight (slow backend), new
+   * deltas keep accumulating in the SAME buffer and the next executed flush
+   * carries ALL of them in ONE appendDelta — so the queue stays bounded (one real
+   * POST per backend round-trip, no-op flushes in between). With fire-time
+   * capture, a slow backend enqueued one ~50ms-of-text POST per window and kept
+   * "streaming" for minutes after the gateway had finished. */
+  private flushDelta(messageId: string): Promise<void> {
     const timer = this.flushTimer.get(messageId);
     if (timer) {
       clearTimeout(timer);
       this.flushTimer.delete(messageId);
     }
-    const text = this.pendingDelta.get(messageId);
-    if (text === undefined || text === "") {
+    const run = this.chain.then(async () => {
+      const text = this.pendingDelta.get(messageId);
       this.pendingDelta.delete(messageId);
-      return;
-    }
-    this.pendingDelta.delete(messageId);
-    await this.post({ op: "appendDelta", messageId, text });
+      if (text === undefined || text === "") {
+        return; // everything already carried by an earlier flush — no POST
+      }
+      try {
+        await this.doPost({ op: "appendDelta", messageId, text });
+      } catch (err) {
+        // Re-buffer the UNSENT text (PREPEND — deltas may have arrived since) so
+        // a transient ingest failure loses nothing; the next flush retries.
+        this.pendingDelta.set(
+          messageId,
+          text + (this.pendingDelta.get(messageId) ?? ""),
+        );
+        throw err;
+      }
+    });
+    // Keep the chain alive even if this flush rejects (don't poison later ops).
+    this.chain = run.catch(() => undefined);
+    return run;
   }
 
   async setSnapshot(messageId: string, text: string): Promise<void> {
