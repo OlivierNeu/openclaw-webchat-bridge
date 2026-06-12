@@ -8,6 +8,17 @@
 # "All implementations test both versions" = run this for each version on a bump.
 set -uo pipefail
 cd "$(dirname "$0")"
+
+# ⚠ This test NEEDS the codex harness (real LLM turns). Standing guard from the
+# 2026-06-11 401 incident: two gateways on the SAME OpenAI account rotate each
+# other's oauth tokens out. Safe iff ~/.codex/auth.json is a DIFFERENT account
+# than the NAS instance (2026-06-11: local=xavier@jodoin.me, NAS=olivier@
+# lacneu.com → disjoint, OK). Opt in explicitly after checking identities.
+if [[ "${OPENCLAW_CODEX_HARNESS:-0}" != "1" ]]; then
+  echo "❌ refusing: codex harness required. After verifying ~/.codex/auth.json is"
+  echo "   a DIFFERENT OpenAI account than the NAS:  OPENCLAW_CODEX_HARNESS=1 $0 $*"
+  exit 1
+fi
 VERSION="${1:?usage: ./test-fileexchange.sh <openclaw-version>}"
 REPO="$(cd .. && pwd)"
 # Convex CLI runs from the WEBCHAT repo (bridge extracted in C3, no convex dep).
@@ -23,7 +34,7 @@ echo "════════ file-exchange smoke test — OpenClaw $VERSION �
 
 # 1) pristine harness on this version (codex harness auto-configured by up.sh).
 ./reset.sh >/dev/null 2>&1 || true
-OPENCLAW_VERSION="$VERSION" ./up.sh >/tmp/fx-up.log 2>&1 || fail "up.sh failed (see /tmp/fx-up.log)"
+OPENCLAW_VERSION="$VERSION" OPENCLAW_CODEX_HARNESS=1 ./up.sh >/tmp/fx-up.log 2>&1 || fail "up.sh failed (see /tmp/fx-up.log)"
 grep -q "codex harness ready" /tmp/fx-up.log || echo "  ⚠ codex harness NOT enabled — agent turns will fail (need ~/.codex/auth.json)"
 
 # 2) (re)start the local bridge on :8787 against the fresh gateway.

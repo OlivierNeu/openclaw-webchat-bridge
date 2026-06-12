@@ -9,6 +9,17 @@
 # Env: emulated amd64-on-arm64 (Docker Desktop Mac), codex harness (ChatGPT Pro).
 set -uo pipefail
 cd "$(dirname "$0")"
+
+# ⚠ This test NEEDS the codex harness (real LLM turns). Standing guard from the
+# 2026-06-11 401 incident: two gateways on the SAME OpenAI account rotate each
+# other's oauth tokens out. Safe iff ~/.codex/auth.json is a DIFFERENT account
+# than the NAS instance (2026-06-11: local=xavier@jodoin.me, NAS=olivier@
+# lacneu.com → disjoint, OK). Opt in explicitly after checking identities.
+if [[ "${OPENCLAW_CODEX_HARNESS:-0}" != "1" ]]; then
+  echo "❌ refusing: codex harness required. After verifying ~/.codex/auth.json is"
+  echo "   a DIFFERENT OpenAI account than the NAS:  OPENCLAW_CODEX_HARNESS=1 $0 $*"
+  exit 1
+fi
 VERSION="${1:?usage: ./test-stability.sh <version> [N]}"
 N="${2:-6}"
 REPO="$(cd .. && pwd)"
@@ -21,7 +32,7 @@ PORT=18790
 
 echo "════════ stability — OpenClaw $VERSION — $N turns ════════"
 ./reset.sh >/dev/null 2>&1 || true
-OPENCLAW_VERSION="$VERSION" ./up.sh >/tmp/stab-up.log 2>&1 || { echo "❌ up.sh failed"; exit 1; }
+OPENCLAW_VERSION="$VERSION" OPENCLAW_CODEX_HARNESS=1 ./up.sh >/tmp/stab-up.log 2>&1 || { echo "❌ up.sh failed"; exit 1; }
 grep -q "codex harness ready" /tmp/stab-up.log || { echo "❌ codex harness not enabled"; exit 1; }
 OLD=$(lsof -t -iTCP:8787 -sTCP:LISTEN 2>/dev/null); [ -n "$OLD" ] && kill "$OLD" 2>/dev/null; sleep 1
 TOKEN="$(cat .token)"

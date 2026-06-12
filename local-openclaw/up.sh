@@ -25,11 +25,21 @@ until [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1
 done
 echo "✅ gateway healthy on :${OPENCLAW_LOCAL_PORT:-18789}"
 
-# 4) CODEX HARNESS MODE (optional): if you have a local codex login + the seed,
-# inject them so the agent runs on your ChatGPT subscription (no OpenAI API auth,
-# no pay-per-token). The reorder wrapper is already bind-mounted via compose.
+# 4) CODEX HARNESS MODE (opt-in): inject the local codex login + seed so the
+# agent runs on the ChatGPT subscription. ⚠ FOOTGUN (2026-06-11 incident): two
+# gateways refreshing the SAME OpenAI account's oauth tokens rotate each other
+# out → 401 "token invalidated" (happened when this auth.json was COPIED to the
+# NAS). Safe ONLY because ~/.codex/auth.json is a DIFFERENT account than the
+# NAS instance (verified 2026-06-11: local=xavier@jodoin.me, NAS=olivier@
+# lacneu.com). Never copy this file to another gateway; re-check identities if
+# either login changes. Gated behind an explicit env var as a standing guard.
 CODEX_AUTH="${CODEX_AUTH_FILE:-$HOME/.codex/auth.json}"
-if [[ -f "$CODEX_AUTH" && -f seed/openclaw.json ]]; then
+if [[ "${OPENCLAW_CODEX_HARNESS:-0}" != "1" ]]; then
+  echo "ℹ codex harness DISABLED (default). Gateway stays unconfigured: discovery,"
+  echo "  sessions.patch/config/agents.files probes work; LLM turns do not."
+  echo "  Enable with: OPENCLAW_CODEX_HARNESS=1 ./up.sh"
+  echo "  (safe iff ~/.codex/auth.json is a DIFFERENT OpenAI account than the NAS)"
+elif [[ -f "$CODEX_AUTH" && -f seed/openclaw.json ]]; then
   echo "▶ enabling codex harness mode (reusing $CODEX_AUTH) …"
   docker cp seed/openclaw.json oc-local-gateway:/home/node/.openclaw/openclaw.json
   docker exec oc-local-gateway sh -c 'mkdir -p /home/node/.openclaw/.codex'
