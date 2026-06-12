@@ -18,17 +18,23 @@ import {
 describe("parsePatchBody", () => {
   // Every body now carries the per-turn routing (agentId + canonical) Convex
   // resolves; the parser requires it (no env fallback — Phase 2 prod fix).
+  // The knob intent rides COMPLETE under `sessionSettings` — the same nested
+  // shape as /send (one source of truth, P2-4); flat knob fields are gone.
   const R = { agentId: "olivier", canonical: "alice" };
 
   it("parses a reasoning-only patch", () => {
     const body = parsePatchBody(
-      JSON.stringify({ chatId: "c1", openclawChatId: "oc1", thinkingLevel: "low", ...R }),
+      JSON.stringify({
+        chatId: "c1",
+        openclawChatId: "oc1",
+        sessionSettings: { thinkingLevel: "low" },
+        ...R,
+      }),
     );
     expect(body).toEqual({
       chatId: "c1",
       openclawChatId: "oc1",
-      thinkingLevel: "low",
-      model: null,
+      sessionSettings: { thinkingLevel: "low", model: null },
       agentId: "olivier",
       canonical: "alice",
       instanceName: null,
@@ -36,29 +42,59 @@ describe("parsePatchBody", () => {
   });
 
   it("parses a model-only patch", () => {
-    const body = parsePatchBody(JSON.stringify({ chatId: "c1", model: "gpt-5.5", ...R }));
-    expect(body).toMatchObject({ chatId: "c1", model: "gpt-5.5", thinkingLevel: null });
+    const body = parsePatchBody(
+      JSON.stringify({ chatId: "c1", sessionSettings: { model: "gpt-5.5" }, ...R }),
+    );
+    expect(body).toMatchObject({
+      chatId: "c1",
+      sessionSettings: { model: "gpt-5.5", thinkingLevel: null },
+    });
     expect(body?.openclawChatId).toBeNull();
   });
 
   it("rejects a body with NO knob (nothing to patch)", () => {
     expect(parsePatchBody(JSON.stringify({ chatId: "c1", ...R }))).toBeNull();
     expect(
-      parsePatchBody(JSON.stringify({ chatId: "c1", thinkingLevel: "", model: "", ...R })),
+      parsePatchBody(
+        JSON.stringify({
+          chatId: "c1",
+          sessionSettings: { thinkingLevel: "", model: "" },
+          ...R,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects FLAT knob fields (the pre-P2-4 body shape is gone)", () => {
+    expect(
+      parsePatchBody(JSON.stringify({ chatId: "c1", thinkingLevel: "low", ...R })),
+    ).toBeNull();
+    expect(
+      parsePatchBody(JSON.stringify({ chatId: "c1", clears: ["model"], ...R })),
     ).toBeNull();
   });
 
   it("rejects a body missing chatId", () => {
-    expect(parsePatchBody(JSON.stringify({ thinkingLevel: "low", ...R }))).toBeNull();
+    expect(
+      parsePatchBody(
+        JSON.stringify({ sessionSettings: { thinkingLevel: "low" }, ...R }),
+      ),
+    ).toBeNull();
   });
 
   it("rejects a body missing routing (agentId/canonical) — no env fallback", () => {
     expect(
-      parsePatchBody(JSON.stringify({ chatId: "c1", thinkingLevel: "low" })),
+      parsePatchBody(
+        JSON.stringify({ chatId: "c1", sessionSettings: { thinkingLevel: "low" } }),
+      ),
     ).toBeNull();
     expect(
       parsePatchBody(
-        JSON.stringify({ chatId: "c1", thinkingLevel: "low", agentId: "olivier" }),
+        JSON.stringify({
+          chatId: "c1",
+          sessionSettings: { thinkingLevel: "low" },
+          agentId: "olivier",
+        }),
       ),
     ).toBeNull(); // canonical still missing
   });
@@ -71,9 +107,16 @@ describe("parsePatchBody", () => {
 
   it("ignores non-string knob values (defensive)", () => {
     const body = parsePatchBody(
-      JSON.stringify({ chatId: "c1", thinkingLevel: 3, model: "gpt-5.5", ...R }),
+      JSON.stringify({
+        chatId: "c1",
+        sessionSettings: { thinkingLevel: 3, model: "gpt-5.5" },
+        ...R,
+      }),
     );
-    expect(body).toMatchObject({ thinkingLevel: null, model: "gpt-5.5" });
+    expect(body?.sessionSettings).toMatchObject({
+      thinkingLevel: null,
+      model: "gpt-5.5",
+    });
   });
 });
 

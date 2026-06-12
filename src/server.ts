@@ -24,12 +24,40 @@ import { classifyGatewayError } from "./core/dispatch-errors.js";
 import { gatewayHostOf, type HealthRegistry, type TargetRef } from "./core/health.js";
 import type { ConvexWriter, SessionMetaReport } from "./convex-writer.js";
 import type { SessionRegistry, BridgeSession, SessionRouting } from "./session.js";
+import {
+  parseAgentFilesBody,
+  parseConfigDefaultsBody,
+  performAgentFilesOp,
+  performConfigDefaultsOp,
+  type GatewayRequester,
+} from "./conf.js";
 
-/** Per-chat OpenClaw knob intent (reasoning level / model). Non-secret. */
+/** Per-chat OpenClaw knob intent (reasoning/model/speed). Non-secret. */
 interface SessionSettings {
   thinkingLevel?: string | null;
   model?: string | null;
+  /**
+   * Speed knob (`sessions.patch {fastMode}`; OpenAI serviceTier under the
+   * hood). ⚠ `false` is a VALID value to apply — presence is checked with
+   * `!== undefined`, NEVER a falsy check like the string knobs above.
+   */
+  fastMode?: boolean;
+  /**
+   * Overrides to UNSET on the gateway (`sessions.patch {<field>: null}` —
+   * verified 6.5: null REMOVES the override from the session store). Persisted
+   * INSIDE the intent by the app (P2-4) so an unset survives a bridge outage
+   * exactly like a set: the per-turn re-apply repairs it. STRICT allowlist.
+   */
+  clears?: ClearableField[];
 }
+
+/**
+ * Per-chat overrides `/patch` can UNSET (sessions.patch `{<field>: null}` —
+ * verified 6.5: null REMOVES the override from the session store). STRICT
+ * allowlist: a clears entry outside this list rejects the whole body.
+ */
+const CLEARABLE_FIELDS = ["thinkingLevel", "model", "fastMode"] as const;
+type ClearableField = (typeof CLEARABLE_FIELDS)[number];
 
 /**
  * Per-turn routing resolved by Convex and carried in EVERY body. `agentId` and
@@ -59,8 +87,12 @@ interface SendBody extends BodyRouting {
 interface PatchBody extends BodyRouting {
   chatId: string;
   openclawChatId: string | null;
-  thinkingLevel: string | null;
-  model: string | null;
+  /**
+   * The COMPLETE per-chat intent (sets + `clears`), nested exactly like the
+   * `/send` body carries it — never flat partial fields, never a top-level
+   * `clears` (one source of truth, P2-4).
+   */
+  sessionSettings: SessionSettings;
 }
 
 /** Inbound body for a session reset (`POST /reset`). */
@@ -169,6 +201,10 @@ export function parseSendBody(raw: string): SendBody | null {
   }
   const routing = parseBodyRouting(obj);
   if (routing === null) return null;
+  const sessionSettings = parseSessionSettings(obj.sessionSettings);
+  // A malformed clears list poisons the whole body (never silently drop an
+  // unset); a missing/empty intent is fine for a send.
+  if (sessionSettings === "invalid") return null;
   return {
     ...routing,
     chatId: obj.chatId,
@@ -176,7 +212,7 @@ export function parseSendBody(raw: string): SendBody | null {
     text: obj.text,
     clientMessageId: obj.clientMessageId,
     messageId: typeof obj.messageId === "string" ? obj.messageId : null,
-    sessionSettings: parseSessionSettings(obj.sessionSettings),
+    sessionSettings,
     attachments: obj.attachments,
   };
 }
@@ -201,20 +237,64 @@ export function parseResetBody(raw: string): ResetBody | null {
   };
 }
 
-/** Defensive parse of the (optional) per-chat knob intent. Exported for tests. */
-export function parseSessionSettings(raw: unknown): SessionSettings | null {
+/**
+ * Defensive parse of the (optional) per-chat knob intent. Returns `null` for
+ * "no intent" (absent/shapeless/empty), the literal string `"invalid"` when
+ * `clears` is malformed or contains an entry outside CLEARABLE_FIELDS — the
+ * caller must reject the WHOLE body (400) rather than silently dropping an
+ * unset. Exported for tests.
+ */
+export function parseSessionSettings(
+  raw: unknown,
+): SessionSettings | null | "invalid" {
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
   const str = (v: unknown): string | null =>
     typeof v === "string" && v.length > 0 ? v : null;
+  const clears = parseClears(o.clears);
+  if (clears === null) return "invalid";
   const settings: SessionSettings = {
     thinkingLevel: str(o.thinkingLevel),
     model: str(o.model),
   };
-  return settings.thinkingLevel || settings.model ? settings : null;
+  // fastMode: only a real boolean is an intent (false included) — anything
+  // else means "no intent" and the key stays absent.
+  if (typeof o.fastMode === "boolean") settings.fastMode = o.fastMode;
+  // clears ride in the intent (P2-4); an empty list is the same as absent.
+  if (clears.length > 0) settings.clears = clears;
+  return settings.thinkingLevel ||
+    settings.model ||
+    settings.fastMode !== undefined ||
+    settings.clears !== undefined
+    ? settings
+    : null;
 }
 
-/** Defensive parse of the immediate write-back body. Exported for tests. */
+/**
+ * Validate an optional `clears` field against the STRICT allowlist. Returns
+ * the (possibly empty) list, or null when the field is malformed or contains
+ * ANY entry outside CLEARABLE_FIELDS (reject the whole body — 400).
+ */
+function parseClears(raw: unknown): ClearableField[] | null {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return null;
+  for (const entry of raw) {
+    if (
+      typeof entry !== "string" ||
+      !(CLEARABLE_FIELDS as readonly string[]).includes(entry)
+    ) {
+      return null;
+    }
+  }
+  return raw as ClearableField[];
+}
+
+/**
+ * Defensive parse of the immediate write-back body. The knob intent (sets +
+ * clears) rides COMPLETE under `sessionSettings` — the same nested shape the
+ * `/send` body carries (one source of truth, P2-4); flat knob fields and a
+ * top-level `clears` are no longer part of the contract. Exported for tests.
+ */
 export function parsePatchBody(raw: string): PatchBody | null {
   let parsed: unknown;
   try {
@@ -225,20 +305,17 @@ export function parsePatchBody(raw: string): PatchBody | null {
   if (typeof parsed !== "object" || parsed === null) return null;
   const obj = parsed as Record<string, unknown>;
   if (typeof obj.chatId !== "string") return null;
-  const str = (v: unknown): string | null =>
-    typeof v === "string" && v.length > 0 ? v : null;
-  const thinkingLevel = str(obj.thinkingLevel);
-  const model = str(obj.model);
-  // At least one knob must be present, else there is nothing to patch.
-  if (!thinkingLevel && !model) return null;
+  const sessionSettings = parseSessionSettings(obj.sessionSettings);
+  // Malformed clears (allowlist violation) OR no intent at all (at least one
+  // knob or one clear must be present) -> nothing to patch -> 400.
+  if (sessionSettings === "invalid" || sessionSettings === null) return null;
   const routing = parseBodyRouting(obj);
   if (routing === null) return null;
   return {
     ...routing,
     chatId: obj.chatId,
     openclawChatId: typeof obj.openclawChatId === "string" ? obj.openclawChatId : null,
-    thinkingLevel,
-    model,
+    sessionSettings,
   };
 }
 
@@ -363,16 +440,27 @@ async function ensureAvailableModels(
  * Apply the user's per-chat knob intent to the gateway via `sessions.patch`.
  * Idempotent (patching to the current value is a no-op server-side). Used by BOTH
  * the immediate write-back (`/patch`) and the per-turn re-apply in `performSend`
- * (so a reset/rolled session keeps the user's reasoning/model). Non-fatal: a patch
- * failure is logged and the turn proceeds with whatever the session already had.
+ * (so a reset/rolled session keeps the user's reasoning/model — AND its unsets:
+ * `settings.clears` is applied here too, so an unset lost to a bridge outage is
+ * repaired on the next turn, P2-4). Non-fatal: a patch failure is logged and the
+ * turn proceeds with whatever the session already had. Exported for tests.
  */
-async function applySessionSettings(
-  conn: BridgeSession["connection"],
+export async function applySessionSettings(
+  conn: GatewayRequester,
   sessionKey: string,
   settings: SessionSettings | null,
 ): Promise<void> {
   if (!settings) return;
   try {
+    // UNSETS first: `{<field>: null}` removes the stored override (verified
+    // 6.5); clearing an already-cleared field is an idempotent no-op.
+    for (const field of settings.clears ?? []) {
+      await conn.request(
+        "sessions.patch",
+        { key: sessionKey, [field]: null },
+        10_000,
+      );
+    }
     if (settings.thinkingLevel) {
       await conn.request(
         "sessions.patch",
@@ -387,12 +475,43 @@ async function applySessionSettings(
         10_000,
       );
     }
+    // fastMode: `false` is a real value to apply — presence check MUST be
+    // `!== undefined` (a falsy check would silently drop "Standard speed").
+    if (settings.fastMode !== undefined) {
+      await conn.request(
+        "sessions.patch",
+        { key: sessionKey, fastMode: settings.fastMode },
+        10_000,
+      );
+    }
   } catch (err) {
     console.error(
       "[sessionSettings] patch skipped (non-fatal):",
       (err as Error)?.message ?? err,
     );
   }
+}
+
+/**
+ * `/patch` worker: UNSET the cleared overrides FIRST (`sessions.patch
+ * {<field>: null}` — verified 6.5: null removes the override from the session
+ * store), then apply the remaining knob intent. A failed CLEAR throws (the
+ * route maps it to 502) so the user sees the unset did not land NOW; the app
+ * keeps the field in the persisted `sessionSettings.clears` regardless, so the
+ * per-turn re-apply (applySessionSettings in performSend) repairs it on a later
+ * turn anyway (P2-4). Exported for tests.
+ */
+export async function applyPatchIntent(
+  conn: GatewayRequester,
+  sessionKey: string,
+  settings: SessionSettings,
+): Promise<void> {
+  for (const field of settings.clears ?? []) {
+    await conn.request("sessions.patch", { key: sessionKey, [field]: null }, 10_000);
+  }
+  // Remaining sets stay non-fatal (UI-3 contract). `clears` is stripped: it was
+  // just applied strictly above; applySessionSettings must not re-send it.
+  await applySessionSettings(conn, sessionKey, { ...settings, clears: undefined });
 }
 
 async function performSend(
@@ -495,10 +614,7 @@ async function performPatch(
   const conn = session.connection;
   const sessionKey = session.sessionKey;
 
-  await applySessionSettings(conn, sessionKey, {
-    thinkingLevel: body.thinkingLevel,
-    model: body.model,
-  });
+  await applyPatchIntent(conn, sessionKey, body.sessionSettings);
 
   // Confirm + mirror the live state so the chip converges to the truth.
   try {
@@ -527,6 +643,42 @@ async function performReset(session: BridgeSession): Promise<void> {
   const conn = session.connection;
   await conn.request("sessions.reset", { key: session.sessionKey }, 10_000);
   conn.verboseFullApplied = false;
+}
+
+/**
+ * Manual context compaction (`sessions.compact`). Unlike reset it PRESERVES the
+ * session (summarized context), so verboseFullApplied stays as-is. Longer
+ * timeout: the gateway summarizes with the model, which can take well beyond
+ * the default RPC budget.
+ */
+async function performCompact(session: BridgeSession): Promise<void> {
+  await session.connection.request(
+    "sessions.compact",
+    { key: session.sessionKey },
+    60_000,
+  );
+}
+
+/**
+ * Open a SHORT-LIVED operator connection for a non-chat-scoped op (same
+ * pattern as `discoverAgents`): dedicated — never a registry session, so no
+ * normalizer consumer starts and the per-chat session map stays clean.
+ * Mono-tenant: the single configured gateway IS the routed instance.
+ */
+async function withOperatorConnection<T>(
+  config: BridgeConfig,
+  fn: (conn: OpenClawConnection) => Promise<T>,
+): Promise<T> {
+  const conn = await OpenClawConnection.connect(
+    config.openclawGatewayUrl,
+    config.openclawToken,
+    config.deviceIdentity,
+  );
+  try {
+    return await fn(conn);
+  } finally {
+    conn.close();
+  }
 }
 
 // --- Agent discovery (provider-agnostic, normalized for the app) -------------
@@ -648,9 +800,14 @@ export interface BridgeServerDeps {
  * Create (but do not start) the inbound HTTP server. Call `.listen(port)`.
  *
  * Routes:
- *   GET  /health  -> liveness probe (no auth)
- *   POST /send    -> authenticated turn dispatch from Convex
- *   POST /patch   -> authenticated knob write-back (reasoning/model) from Convex
+ *   GET  /health          -> liveness probe (no auth)
+ *   POST /send            -> authenticated turn dispatch from Convex
+ *   POST /patch           -> authenticated knob write-back (reasoning/model/
+ *                            speed + per-field clears) from Convex
+ *   POST /reset           -> authenticated session reset
+ *   POST /compact         -> authenticated manual context compaction
+ *   POST /agent-files     -> authenticated agent workspace file list/get/set
+ *   POST /config-defaults -> authenticated gateway chat-defaults get/set
  */
 export function createBridgeServer(deps: BridgeServerDeps): Server {
   const { config, registry, health } = deps;
@@ -730,10 +887,15 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       return;
     }
 
-    if (
-      req.method !== "POST" ||
-      (req.url !== "/send" && req.url !== "/patch" && req.url !== "/reset")
-    ) {
+    const POST_ROUTES = [
+      "/send",
+      "/patch",
+      "/reset",
+      "/compact",
+      "/agent-files",
+      "/config-defaults",
+    ];
+    if (req.method !== "POST" || !POST_ROUTES.includes(req.url ?? "")) {
       sendJson(res, 404, { ok: false, error: "not found" });
       return;
     }
@@ -791,6 +953,95 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
       } catch (err) {
         console.error("bridge /reset failed:", (err as Error)?.message ?? err);
         sendJson(res, 502, { ok: false, error: "upstream reset failed" });
+      }
+      return;
+    }
+
+    if (req.url === "/compact") {
+      // EXACT same body shape + session routing as /reset (chatId + per-turn
+      // routing -> registry session key), hence the shared parser.
+      const compact = parseResetBody(raw);
+      if (compact === null) {
+        sendJson(res, 400, { ok: false, error: "invalid body" });
+        return;
+      }
+      if (isInstanceMismatch(config.instanceName, compact.instanceName)) {
+        sendJson(res, 409, { ok: false, error: { code: "instance_mismatch" } });
+        return;
+      }
+      try {
+        const session = await registry.acquire(toRouting(compact));
+        await performCompact(session);
+        sendJson(res, 200, { ok: true });
+      } catch (err) {
+        const code = classifyGatewayError(err);
+        console.error(`bridge /compact failed [${code}]:`, (err as Error)?.message ?? err);
+        sendJson(res, 502, { ok: false, error: { code } });
+      }
+      return;
+    }
+
+    if (req.url === "/agent-files") {
+      const body = parseAgentFilesBody(raw);
+      if (body === null) {
+        sendJson(res, 400, { ok: false, error: "invalid body" });
+        return;
+      }
+      if (isInstanceMismatch(config.instanceName, body.instanceName)) {
+        // Same guard as /reset (P2-3): never answer for an instance this
+        // bridge does not serve.
+        sendJson(res, 409, { ok: false, error: { code: "instance_mismatch" } });
+        return;
+      }
+      try {
+        const result = await withOperatorConnection(config, (conn) =>
+          performAgentFilesOp(conn, body),
+        );
+        sendJson(res, result.status, result.body);
+      } catch (err) {
+        const code = classifyGatewayError(err);
+        console.error(
+          `bridge /agent-files ${body.op} failed [${code}]:`,
+          (err as Error)?.message ?? err,
+        );
+        sendJson(res, 502, { ok: false, error: { code } });
+      }
+      return;
+    }
+
+    if (req.url === "/config-defaults") {
+      const body = parseConfigDefaultsBody(raw);
+      if (body === null) {
+        sendJson(res, 400, { ok: false, error: "invalid body" });
+        return;
+      }
+      if (isInstanceMismatch(config.instanceName, body.instanceName)) {
+        // Same guard as /reset (P2-3): the global config belongs to ONE
+        // gateway — refuse a body that claims a different instance.
+        sendJson(res, 409, { ok: false, error: { code: "instance_mismatch" } });
+        return;
+      }
+      try {
+        const result = await withOperatorConnection(config, (conn) =>
+          performConfigDefaultsOp(conn, body),
+        );
+        sendJson(res, result.status, result.body);
+      } catch (err) {
+        const code = classifyGatewayError(err);
+        if (code === "INVALID_REQUEST" && body.op === "set") {
+          // The config.patch params shape ({raw, baseHash}) is bench-verified
+          // on 2026.6.5 — an INVALID_REQUEST here most likely means the shape
+          // drifted on a NEWER gateway version. Precise operator hint, non-PHI.
+          console.error(
+            "bridge /config-defaults: gateway rejected config.patch — " +
+              "re-verify the {raw, baseHash} params shape against this gateway version",
+          );
+        }
+        console.error(
+          `bridge /config-defaults ${body.op} failed [${code}]:`,
+          (err as Error)?.message ?? err,
+        );
+        sendJson(res, 502, { ok: false, error: { code } });
       }
       return;
     }
