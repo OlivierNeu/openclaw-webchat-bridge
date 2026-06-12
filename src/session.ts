@@ -12,6 +12,7 @@
 
 import { OpenClawConnection } from "./providers/openclaw/openclaw-client.js";
 import { RunManager } from "./providers/openclaw/run-manager.js";
+import { extractMessageToolReplies } from "./providers/openclaw/history-recovery.js";
 import type { ConvexWriter } from "./convex-writer.js";
 import type { BridgeConfig } from "./config.js";
 import { buildSessionKey } from "./providers/openclaw/session-keys.js";
@@ -112,6 +113,39 @@ class Session implements BridgeSession {
           console.error("session tick error:", (err as Error)?.message ?? err);
         }
       }
+      // Webchat sink (history recovery): when the turn delivered its reply via
+      // the gateway message-tool and is now grace-holding a bare ack, fetch the
+      // transcript ONCE and feed the delivered text back. Runs concurrently
+      // with the loop; a failure just lets the ack-grace flush as before.
+      if (this.runManager.takeRecoveryRequest()) {
+        void this.recoverDeliveredReply();
+      }
+    }
+  }
+
+  private async recoverDeliveredReply(): Promise<void> {
+    try {
+      const raw = await this.connection.request(
+        "sessions.get",
+        { key: this.sessionKey },
+        10_000,
+      );
+      const payload =
+        raw && typeof raw === "object" && "payload" in raw
+          ? (raw as { payload: unknown }).payload
+          : raw;
+      const text = extractMessageToolReplies(payload);
+      if (text) {
+        await this.runManager.recoverVisibleText(text, this.clock());
+        console.log(
+          `[recovery] message-tool reply recovered (${text.length} chars) chat=${this.chatId}`,
+        );
+      } else {
+        console.log(`[recovery] no recoverable delivery found chat=${this.chatId}`);
+      }
+    } catch (err) {
+      // Non-fatal: the private-ack grace will flush best-effort content.
+      console.error("[recovery] sessions.get failed:", (err as Error)?.message ?? err);
     }
   }
 

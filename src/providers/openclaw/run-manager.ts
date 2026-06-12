@@ -44,6 +44,20 @@ export class RunManager {
   private tallyFrame(frame: unknown): void {
     if (typeof frame !== "object" || frame === null) return;
     const f = frame as Record<string, unknown>;
+    // Targeted frame dump (BRIDGE_FRAME_DUMP=<substring>): logs every frame
+    // whose JSON contains the substring. Diagnostic-only (e.g. capturing the
+    // exact 6.5 shape of message-tool deliveries); off unless the env is set.
+    const dumpNeedle = process.env.BRIDGE_FRAME_DUMP;
+    if (dumpNeedle) {
+      try {
+        const s = JSON.stringify(frame);
+        if (s.includes(dumpNeedle)) {
+          console.log(`[frame-dump] ${s.slice(0, 2400)}`);
+        }
+      } catch {
+        /* unserializable frame — tally below still counts it */
+      }
+    }
     const payload =
       typeof f.payload === "object" && f.payload !== null
         ? (f.payload as Record<string, unknown>)
@@ -118,6 +132,27 @@ export class RunManager {
       return;
     }
     await this.sink.apply(this.normalizer.tick(now));
+  }
+
+  /**
+   * History-recovery seam (the webchat sink): true exactly once per turn when
+   * the normalizer holds a bare ack after a gateway-delivered message-tool —
+   * the session loop should fetch `sessions.get` and call `recoverVisibleText`.
+   */
+  takeRecoveryRequest(): boolean {
+    if (!this.normalizer.wantsHistoryRecovery) {
+      return false;
+    }
+    this.normalizer.markRecoveryAttempted();
+    return true;
+  }
+
+  /** Apply transcript-recovered text as the answer (finalizes the turn). */
+  async recoverVisibleText(text: string, now: number): Promise<void> {
+    if (!this.sink.active) {
+      return;
+    }
+    await this.sink.apply(this.normalizer.recoverVisibleText(text, now));
   }
 
   /**

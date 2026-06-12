@@ -262,6 +262,13 @@ export class Normalizer {
   pendingAckText: string;
   mediaPaths: string[];
   lastDedupKey: string | null;
+  // 6.5 webchat sink: the gateway runs the message-tool itself and only emits a
+  // bare `stream:"item"` frame (no args, no result) — the delivered text lives
+  // ONLY in the session transcript. When such an item was seen AND the turn is
+  // holding a private-ack/empty-final grace, the session loop recovers the text
+  // via `sessions.get` (history recovery, deferred since 5.19) exactly once.
+  sawMessageToolItem: boolean;
+  private recoveryAttempted = false;
   // Buffered tool args by toolCallId: a real tool's start(args) + result(result)
   // coalesce into ONE `completed` tool.status carrying input+output, so the UI
   // shows a single clean card per tool instead of a start card + a result card.
@@ -284,6 +291,7 @@ export class Normalizer {
     this.pendingAckText = "";
     this.mediaPaths = [];
     this.lastDedupKey = null;
+    this.sawMessageToolItem = false;
     this.deadlines = new Map();
   }
 
@@ -301,6 +309,8 @@ export class Normalizer {
     this.pendingAckText = "";
     this.mediaPaths = [];
     this.lastDedupKey = null;
+    this.sawMessageToolItem = false;
+    this.recoveryAttempted = false;
     this.toolArgs.clear();
     // A fresh turn invalidates the previous run ids: frames arriving before the
     // new ack are admitted on sessionKey alone (ownRunIds empty), then the ack
@@ -502,13 +512,54 @@ export class Normalizer {
       return;
     }
     if (stream === "item") {
-      // 5.19 may expose only a message-tool item with hidden args. Recovery via
-      // chat.history is deferred; record that a delivery happened so an empty
-      // turn still finalizes with best-effort content.
+      // 6.5 (bench-verified): the gateway-run message-tool surfaces ONLY as an
+      // item frame {itemId, phase, kind:"tool", name:"message", title, status} —
+      // no args, no result. The delivered text lives in the session transcript
+      // alone. Flag it so the session loop can run the history recovery once
+      // the turn ends up holding a bare ack (wantsHistoryRecovery below).
       if (data.kind === "tool" && data.name === "message") {
-        this.hasVisibleToolText = this.hasVisibleToolText || false;
+        this.sawMessageToolItem = true;
       }
     }
+  }
+
+  // -- history recovery (the webchat sink for gateway-delivered replies) -----
+
+  /**
+   * True when the turn most likely delivered its real reply through the
+   * gateway message-tool and is now holding a grace period with nothing but a
+   * private ack (or an empty final): the session loop should fetch the session
+   * transcript and feed the delivered text back via `recoverVisibleText`.
+   * One-shot per turn (`markRecoveryAttempted`).
+   */
+  get wantsHistoryRecovery(): boolean {
+    return (
+      !this.finalized &&
+      this.sawMessageToolItem &&
+      !this.recoveryAttempted &&
+      !this.hasRealContent() &&
+      (this.deadlines.has("private_ack") || this.deadlines.has("empty_final"))
+    );
+  }
+
+  /** Mark the (single) recovery attempt as started so the loop never re-fires. */
+  markRecoveryAttempted(): void {
+    this.recoveryAttempted = true;
+  }
+
+  /**
+   * Apply transcript-recovered visible text as the authoritative answer and
+   * close the turn (the chat final that armed the grace has already passed).
+   * No-op once finalized (the grace may have flushed the ack meanwhile).
+   */
+  recoverVisibleText(text: string, now: number): BridgeEvent[] {
+    if (this.finalized || !text) {
+      return [];
+    }
+    const events: BridgeEvent[] = [];
+    this.hasVisibleToolText = true;
+    this.applyVisible(text, true, true, now, events);
+    return events;
   }
 
   private handleTool(_payload: JsonObject, data: JsonObject, now: number, events: BridgeEvent[]): void {
