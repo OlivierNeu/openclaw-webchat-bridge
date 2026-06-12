@@ -325,6 +325,36 @@ export function extractAgentDefaults(
   };
 }
 
+/**
+ * Did a confirmed (re-read) defaults snapshot honor every field a `set` body
+ * requested? Pure — the gateway-restart recovery path keys on this.
+ *
+ * Bench-verified (live-protocol, 2026.6.5): `config.patch` can make the
+ * gateway RESTART (`restartReason=config.patch`, e.g. when the normalized
+ * write touches restart-bound sections on a freshly configured gateway). The
+ * operator socket then dies BEFORE the response is read even though the write
+ * APPLIED — the route reconnects and reports success ONLY when this read-back
+ * confirms the values landed.
+ */
+export function defaultsApplied(
+  body: Extract<ConfigDefaultsBody, { op: "set" }>,
+  confirmed: { thinkingDefault: string | null; fastModeDefault: boolean | null },
+): boolean {
+  if (
+    body.thinkingDefault !== null &&
+    confirmed.thinkingDefault !== body.thinkingDefault
+  ) {
+    return false;
+  }
+  if (
+    body.fastModeDefault !== null &&
+    confirmed.fastModeDefault !== body.fastModeDefault
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Top-level `hash` from a `config.get` payload (bench-verified 6.5: the get
  *  payload is `{ config: {...}, hash: "..." }`). */
 function configHash(payload: Record<string, unknown> | undefined): string | null {

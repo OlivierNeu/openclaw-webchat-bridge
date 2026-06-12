@@ -3,7 +3,7 @@
 // normalizer's isolation gate compares `payload.sessionKey` against it, so the
 // shape must match what the gateway emits EXACTLY:
 //   agent:<agentId>:webchat:chat:<canonical>:<chatId>
-// e.g. agent:main:webchat:chat:olivier:own-chat (see the test fixtures).
+// e.g. agent:main:webchat:chat:u-testuser01:own-chat (see the test fixtures).
 
 const SAFE_PART_RE = /[^A-Za-z0-9_.-]+/g;
 

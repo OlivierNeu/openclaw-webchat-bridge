@@ -3,7 +3,8 @@
 A throwaway, **volatile** local OpenClaw gateway for live tests + media-share
 validation, pinned to a chosen version, that you can start/stop on demand. Each
 `reset.sh` gives a **pristine** instance so previous tests never affect the next.
-Based on the same image as the NAS (`neuolivier/openclaw-docker`).
+Based on the published OpenClaw gateway image (`neuolivier/openclaw-docker`;
+override the repository with `OPENCLAW_IMAGE` if you build your own).
 
 ## Usage
 ```bash
@@ -24,16 +25,18 @@ overrides to run the bridge (the repo root, `..`) against this local gateway.
   every pending request. The bridge then connects as **operator**.
 - Gateway boots healthy in ~15s. `/health` → `{"ok":true,"status":"live"}`.
 - **State** lives in the `oc-state` named volume; **outbound media** is a host
-  bind (`./media-outbound`) so a Mac-side bridge reads the SAME files the gateway
-  writes. (The NAS uses a shared named volume — same mechanism.)
+  bind (`./media-outbound`) so a host-side bridge reads the SAME files the gateway
+  writes. (A production deployment typically uses a shared named volume — same
+  mechanism.)
 
 ## Codex HARNESS mode — working agent on YOUR ChatGPT subscription (automatic)
 `up.sh` makes the agent work for FREE on your local codex login (no OpenAI API
 auth, no pay-per-token). It auto-injects, if `~/.codex/auth.json` exists:
-- `seed/openclaw.json` — the NAS olivier config stripped of NAS-only sections →
-  agent **`olivier`** (the bridge routes the agent per-turn from the request body
-  now, so any discovered agent id works), model `openai/gpt-5.5`,
-  **codex runtime (harness)**.
+- `seed/openclaw.json` — a minimal known-good gateway config → generic agents
+  **`alice`**/**`bob`** (the bridge routes the agent per-turn from the request
+  body, so any discovered agent id works), model `openai/gpt-5.5`,
+  **codex runtime (harness)**. To use your own agents/auth profile, drop a
+  gitignored `seed/openclaw.local.json` — `up.sh` prefers it when present.
 - your `~/.codex/auth.json` (copied node-owned into the volume) → OpenClaw spawns
   the local **codex app-server** reusing your ChatGPT session.
 - `codex-yolo-wrapper.sh` (bind-mounted via compose, pointed to by
@@ -41,7 +44,7 @@ auth, no pay-per-token). It auto-injects, if `~/.codex/auth.json` exists:
   `--dangerously-bypass-approvals-and-sandbox` flag to a GLOBAL position, working
   around OpenClaw 2026.5.19's flag-ordering bug (native fix expected >=2026.5.20).
 
-Verify a turn: `docker exec oc-local-gateway node /app/openclaw.mjs agent --agent olivier -m "dis bonjour"`.
+Verify a turn: `docker exec oc-local-gateway node /app/openclaw.mjs agent --agent alice -m "say hello"`.
 
 If `~/.codex/auth.json` is absent, the gateway stays unconfigured (no agent turns;
 the media-share is still testable via docker-exec-write). The codex login is

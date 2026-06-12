@@ -51,10 +51,10 @@ for (const view of ["configured", "all", "default"]) {
 
 // ── P3: agents.files.* ──────────────────────────────────────────────────────
 {
-  const list = await tryRpc(conn, "agents.files.list", { agentId: "olivier" });
-  out("agents.files.list(olivier)", list);
+  const list = await tryRpc(conn, "agents.files.list", { agentId: "alice" });
+  out("agents.files.list(alice)", list);
   const get = await tryRpc(conn, "agents.files.get", {
-    agentId: "olivier",
+    agentId: "alice",
     name: "AGENTS.md",
   });
   out("agents.files.get(AGENTS.md) RAW", get.ok
@@ -63,15 +63,15 @@ for (const view of ["configured", "all", "default"]) {
   // set is restricted to the KNOWN bootstrap file list (probe of a random
   // name returned INVALID_REQUEST "unsupported file"). Round-trip a real one
   // on the ephemeral bench: save HEARTBEAT.md, overwrite, verify, restore.
-  const hb = await tryRpc(conn, "agents.files.get", { agentId: "olivier", name: "HEARTBEAT.md" });
+  const hb = await tryRpc(conn, "agents.files.get", { agentId: "alice", name: "HEARTBEAT.md" });
   const orig = hb.res?.file?.content ?? "";
   const set = await tryRpc(conn, "agents.files.set", {
-    agentId: "olivier", name: "HEARTBEAT.md", content: orig + "\n<!-- probe -->\n",
+    agentId: "alice", name: "HEARTBEAT.md", content: orig + "\n<!-- probe -->\n",
   });
   out("agents.files.set(HEARTBEAT.md)", set);
-  const reread = await tryRpc(conn, "agents.files.get", { agentId: "olivier", name: "HEARTBEAT.md" });
+  const reread = await tryRpc(conn, "agents.files.get", { agentId: "alice", name: "HEARTBEAT.md" });
   out("set round-trip ok", { wroteProbe: String(reread.res?.file?.content ?? "").includes("<!-- probe -->") });
-  await tryRpc(conn, "agents.files.set", { agentId: "olivier", name: "HEARTBEAT.md", content: orig });
+  await tryRpc(conn, "agents.files.set", { agentId: "alice", name: "HEARTBEAT.md", content: orig });
 }
 
 // ── P4: sessions — pick a real session, then patch/unset semantics ──────────

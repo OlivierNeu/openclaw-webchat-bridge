@@ -31,10 +31,10 @@
 # Our OpenClaw setup is externally hardened so this YOLO is acceptable at
 # the Codex layer (defense in depth still applies at the OpenClaw + host
 # layers):
-#   - Container runs as a non-root user (1000017:1000011) with cap_drop:ALL
-#     and no-new-privileges:true (docker-compose.yml).
+#   - Container runs as a non-root user with cap_drop:ALL and
+#     no-new-privileges:true (production compose).
 #   - Filesystem isolated by Docker; only bind-mounts are writable.
-#   - Network on a Docker bridge; gateway behind reverse-proxy DSM, LAN-only.
+#   - Network on a Docker bridge; gateway behind a reverse proxy, LAN-only.
 #   - OpenClaw's own tools.exec / exec-approvals.json gate at the OpenClaw
 #     layer (preset yolo applied separately).
 #

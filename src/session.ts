@@ -43,9 +43,23 @@ export interface BridgeSession {
   readonly clock: Clock;
 }
 
+/**
+ * A live session's non-secret routed identity + the gateway version its
+ * connection captured at handshake. Consumed by `/health` and `/capabilities`
+ * (compat manifest targets). Deliberately excludes chatId/sessionKey: both
+ * endpoints are unauthenticated, so only the bounded operator identity leaks.
+ */
+export interface LiveTarget {
+  canonical: string;
+  agentId: string;
+  gatewayVersion: string | null;
+}
+
 class Session implements BridgeSession {
   readonly chatId: string;
   readonly sessionKey: string;
+  readonly agentId: string;
+  readonly canonical: string;
   readonly connection: OpenClawConnection;
   readonly runManager: RunManager;
   readonly clock: Clock;
@@ -54,12 +68,15 @@ class Session implements BridgeSession {
   constructor(
     chatId: string,
     sessionKey: string,
+    routing: { agentId: string; canonical: string },
     connection: OpenClawConnection,
     writer: ConvexWriter,
     clock: Clock,
   ) {
     this.chatId = chatId;
     this.sessionKey = sessionKey;
+    this.agentId = routing.agentId;
+    this.canonical = routing.canonical;
     this.connection = connection;
     this.runManager = new RunManager(chatId, sessionKey, writer);
     this.clock = clock;
@@ -233,23 +250,51 @@ export class SessionRegistry {
         s.sessionKey === sessionKey ? s : this.acquire(routing),
       );
     }
-    const promise = this.create(chatId, sessionKey).finally(() => {
+    const promise = this.create(chatId, sessionKey, routing).finally(() => {
       this.inflight.delete(chatId);
     });
     this.inflight.set(chatId, promise);
     return promise;
   }
 
-  private async create(chatId: string, sessionKey: string): Promise<Session> {
+  private async create(
+    chatId: string,
+    sessionKey: string,
+    routing: SessionRouting,
+  ): Promise<Session> {
     const connection = await OpenClawConnection.connect(
       this.config.openclawGatewayUrl,
       this.config.openclawToken,
       this.config.deviceIdentity,
     );
-    const session = new Session(chatId, sessionKey, connection, this.writer, this.clock);
+    const session = new Session(
+      chatId,
+      sessionKey,
+      { agentId: routing.agentId, canonical: routing.canonical },
+      connection,
+      this.writer,
+      this.clock,
+    );
     session.startConsumer();
     this.sessions.set(chatId, session);
     return session;
+  }
+
+  /**
+   * Snapshot the routed identity + handshake-captured gateway version of every
+   * LIVE (non-closed) session, for `/health` and `/capabilities`. Non-secret.
+   */
+  listLive(): LiveTarget[] {
+    const out: LiveTarget[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.connection.isClosed) continue;
+      out.push({
+        canonical: session.canonical,
+        agentId: session.agentId,
+        gatewayVersion: session.connection.gatewayVersion,
+      });
+    }
+    return out;
   }
 
   /** Cleanly close every live session (graceful shutdown). */

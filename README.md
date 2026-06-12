@@ -45,11 +45,11 @@ docker build -t openclaw-webchat-bridge:dev .
 
 ## Deployment
 
-Runs as a Container Manager project on the NAS that pulls the published image
-(see the openclaw-webchat deploy runbook). It lives in a different Docker network
-than Convex and the gateway, so **cross-project links use the host IP**, e.g.
-`OPENCLAW_GATEWAY_URL=ws://192.168.1.49:18789`,
-`CONVEX_HTTP_ACTIONS_URL=http://192.168.1.49:3211`.
+Runs as a standalone container that pulls the published image. If it lives in a
+different Docker network than Convex and the gateway, **cross-project links must
+use a host address reachable from the container**, e.g.
+`OPENCLAW_GATEWAY_URL=ws://<your-host>:18789`,
+`CONVEX_HTTP_ACTIONS_URL=http://<your-host>:3211`.
 
 ## License
 

@@ -1,17 +1,19 @@
 import { describe, expect, test } from "vitest";
 import { HealthRegistry, gatewayHostOf, type TargetRef } from "../src/core/health.js";
+import { BRIDGE_VERSION, PROTOCOL_VERSION } from "../src/compat.js";
+import { enrichHealthSnapshot } from "../src/server.js";
 
 const REF: TargetRef = {
-  key: "olivier",
-  canonical: "olivier",
+  key: "u-testuser01",
+  canonical: "u-testuser01",
   agentId: "main",
-  gatewayHost: "192.168.1.49:18789",
+  gatewayHost: "192.0.2.10:18789",
 };
 
 describe("gatewayHostOf", () => {
   test("extracts host:port from a ws/wss/http url (no token)", () => {
-    expect(gatewayHostOf("ws://192.168.1.49:18789")).toBe("192.168.1.49:18789");
-    expect(gatewayHostOf("wss://gateway.lacneu.com")).toBe("gateway.lacneu.com");
+    expect(gatewayHostOf("ws://192.0.2.10:18789")).toBe("192.0.2.10:18789");
+    expect(gatewayHostOf("wss://gateway.example.org")).toBe("gateway.example.org");
   });
   test("degrades gracefully on a non-url", () => {
     expect(gatewayHostOf("not a url")).toBe("not a url");
@@ -37,7 +39,7 @@ describe("HealthRegistry", () => {
     expect(target.lastError).toBeNull();
     expect(target.okCount).toBe(1);
     expect(target.agentId).toBe("main"); // the REAL env agent, not a body claim
-    expect(target.gatewayHost).toBe("192.168.1.49:18789");
+    expect(target.gatewayHost).toBe("192.0.2.10:18789");
   });
 
   test("recordError -> error with the curated code + when", () => {
@@ -72,5 +74,37 @@ describe("HealthRegistry", () => {
     h.recordOk(REF);
     expect(h.snapshot().targets).toHaveLength(1);
     expect(h.snapshot().targets[0]!.attempts).toBe(3);
+  });
+});
+
+describe("enrichHealthSnapshot (additive compat fields)", () => {
+  test("preserves every legacy field and adds bridge/protocol versions", () => {
+    const h = new HealthRegistry(1000, () => 2000);
+    h.recordOk(REF);
+    const plain = h.snapshot();
+    const enriched = enrichHealthSnapshot(plain, []);
+    // Top-level legacy fields are untouched (the Convex poller's contract).
+    expect(enriched.status).toBe(plain.status);
+    expect(enriched.startedAt).toBe(plain.startedAt);
+    expect(enriched.now).toBe(plain.now);
+    expect(enriched.bridgeVersion).toBe(BRIDGE_VERSION);
+    expect(enriched.protocolVersion).toBe(PROTOCOL_VERSION);
+    // Per-target: every legacy field intact + the additive gatewayVersion.
+    const before = plain.targets[0]!;
+    const after = enriched.targets[0]!;
+    expect(after).toEqual({ ...before, gatewayVersion: null });
+  });
+
+  test("maps gatewayVersion from the live session sharing the canonical", () => {
+    const h = new HealthRegistry(0, () => 1);
+    h.recordOk(REF);
+    h.recordOk({ ...REF, key: "u-bob", canonical: "u-bob" });
+    const enriched = enrichHealthSnapshot(h.snapshot(), [
+      { canonical: "u-testuser01", agentId: "main", gatewayVersion: "2026.6.5" },
+    ]);
+    const byKey = new Map(enriched.targets.map((t) => [t.key, t]));
+    expect(byKey.get("u-testuser01")!.gatewayVersion).toBe("2026.6.5");
+    // No live session for that canonical -> honestly unknown.
+    expect(byKey.get("u-bob")!.gatewayVersion).toBeNull();
   });
 });

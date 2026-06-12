@@ -1,22 +1,22 @@
 {
-  "defaultId": "olivier",
+  "defaultId": "agent-a",
   "mainKey": "main",
   "scope": "per-sender",
   "agents": [
     {
-      "id": "olivier",
-      "name": "Olivier",
-      "identity": { "name": "Olivier" },
-      "workspace": "/home/node/.openclaw/workspace-olivier",
+      "id": "agent-a",
+      "name": "Agent A",
+      "identity": { "name": "Agent A" },
+      "workspace": "/home/node/.openclaw/workspace-agent-a",
       "agentRuntime": { "id": "codex", "source": "implicit" },
       "thinkingDefault": "high",
       "model": { "primary": "openai/gpt-5.5" }
     },
     {
-      "id": "pissey",
-      "name": "Pissey",
-      "identity": { "name": "Pissey", "emoji": "⚔️" },
-      "workspace": "/home/node/.openclaw/workspace-pissey",
+      "id": "agent-b",
+      "name": "Agent B",
+      "identity": { "name": "Agent B", "emoji": "⚔️" },
+      "workspace": "/home/node/.openclaw/workspace-agent-b",
       "agentRuntime": { "id": "codex", "source": "implicit" },
       "model": { "primary": "openai/gpt-5.5" }
     }

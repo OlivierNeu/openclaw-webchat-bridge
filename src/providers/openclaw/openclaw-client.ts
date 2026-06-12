@@ -29,7 +29,7 @@ import type { DeviceIdentity } from "../../config.js";
 // transport-trust based, NOT scope based — requesting admin only fails over an
 // UNTRUSTED transport (plain ws from a non-loopback peer), which is why the local
 // harness routes the host bridge through the oc-loopback socat sidecar
-// (loopback = trusted) and the NAS uses wss (also trusted). Over a trusted
+// (loopback = trusted) and production uses wss (also trusted). Over a trusted
 // transport the gateway grants admin to the paired device normally.
 const DEFAULT_SCOPES = [
   "operator.read",
@@ -170,6 +170,12 @@ export class OpenClawConnection {
   // `null` = not yet fetched; `[]` = fetched, none available.
   availableModels: { id: string; label: string }[] | null = null;
 
+  // Gateway server version captured from the connect hello-ok payload
+  // (`payload.server.version`, verified live — the same field the harness'
+  // version oracle keys on). `null` when the handshake does not carry it; the
+  // compat manifest then applies its CONSERVATIVE capability policy.
+  gatewayVersion: string | null = null;
+
   private constructor(ws: WebSocket) {
     this.ws = ws;
   }
@@ -284,6 +290,12 @@ export class OpenClawConnection {
           settled = true;
           clearTimeout(connectTimer);
           connection = new OpenClawConnection(ws);
+          // Capture the gateway version for the compat manifest (defensive:
+          // an absent/non-string field leaves null -> conservative policy).
+          connection.gatewayVersion =
+            typeof server.version === "string" && server.version.length > 0
+              ? server.version
+              : null;
           connection.attachReader();
           resolve(connection);
           return;

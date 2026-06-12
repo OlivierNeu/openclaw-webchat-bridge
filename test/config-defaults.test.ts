@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultsApplied,
   extractAgentDefaults,
   parseConfigDefaultsBody,
   performConfigDefaultsOp,
@@ -243,5 +244,61 @@ describe("performConfigDefaultsOp", () => {
       }),
     ).rejects.toThrow(/INVALID_REQUEST/);
     expect(calls.filter((c) => c.method === "config.patch")).toHaveLength(1);
+  });
+});
+
+describe("defaultsApplied (gateway-restart read-back confirmation)", () => {
+  // Live-protocol finding (2026.6.5): config.patch can RESTART the gateway
+  // (restartReason=config.patch), dropping the socket after the write APPLIED.
+  // The route reconnects and reports success iff this read-back matches.
+  const setBody = (
+    thinkingDefault: string | null,
+    fastModeDefault: boolean | null,
+  ) =>
+    ({ op: "set", instanceName: null, thinkingDefault, fastModeDefault }) as const;
+
+  it("confirms when every requested field reads back as written", () => {
+    expect(
+      defaultsApplied(setBody("low", null), {
+        thinkingDefault: "low",
+        fastModeDefault: null,
+      }),
+    ).toBe(true);
+    expect(
+      defaultsApplied(setBody("low", true), {
+        thinkingDefault: "low",
+        fastModeDefault: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("an unrequested field never blocks confirmation", () => {
+    expect(
+      defaultsApplied(setBody("low", null), {
+        thinkingDefault: "low",
+        fastModeDefault: false, // pre-existing value, not part of this set
+      }),
+    ).toBe(true);
+  });
+
+  it("refuses when a requested field did NOT land", () => {
+    expect(
+      defaultsApplied(setBody("low", null), {
+        thinkingDefault: "high",
+        fastModeDefault: null,
+      }),
+    ).toBe(false);
+    expect(
+      defaultsApplied(setBody("low", null), {
+        thinkingDefault: null,
+        fastModeDefault: null,
+      }),
+    ).toBe(false);
+    expect(
+      defaultsApplied(setBody(null, true), {
+        thinkingDefault: null,
+        fastModeDefault: false,
+      }),
+    ).toBe(false);
   });
 });

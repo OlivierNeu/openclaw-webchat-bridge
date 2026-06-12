@@ -63,10 +63,10 @@ describe("SessionRegistry — body-routed keys + re-key", () => {
     const s = await reg.acquire({
       chatId: "c1",
       openclawChatId: "oc1",
-      agentId: "pissey",
+      agentId: "agent-b",
       canonical: "alice",
     });
-    expect(s.sessionKey).toBe("agent:pissey:webchat:chat:alice:oc1");
+    expect(s.sessionKey).toBe("agent:agent-b:webchat:chat:alice:oc1");
     reg.closeAll();
   });
 
@@ -75,7 +75,7 @@ describe("SessionRegistry — body-routed keys + re-key", () => {
       .spyOn(OpenClawConnection, "connect")
       .mockImplementation(async () => fakeConn() as never);
     const reg = new SessionRegistry(config, {} as never);
-    const r = { chatId: "c1", openclawChatId: "oc1", agentId: "olivier", canonical: "alice" };
+    const r = { chatId: "c1", openclawChatId: "oc1", agentId: "agent-a", canonical: "alice" };
     const a = await reg.acquire(r);
     const b = await reg.acquire(r);
     expect(b).toBe(a);
@@ -91,18 +91,18 @@ describe("SessionRegistry — body-routed keys + re-key", () => {
     const first = await reg.acquire({
       chatId: "c1",
       openclawChatId: "oc1",
-      agentId: "olivier",
+      agentId: "agent-a",
       canonical: "alice",
     });
     const second = await reg.acquire({
       chatId: "c1",
       openclawChatId: "oc1",
-      agentId: "pissey", // rebind to a different agent
+      agentId: "agent-b", // rebind to a different agent
       canonical: "alice",
     });
     expect(second).not.toBe(first);
     expect(first.connection.isClosed).toBe(true); // stale one closed → no leak
-    expect(second.sessionKey).toBe("agent:pissey:webchat:chat:alice:oc1");
+    expect(second.sessionKey).toBe("agent:agent-b:webchat:chat:alice:oc1");
     expect(connect).toHaveBeenCalledTimes(2);
     reg.closeAll();
   });
@@ -118,13 +118,13 @@ describe("SessionRegistry — body-routed keys + re-key", () => {
     await reg.acquire({
       chatId: "c1",
       openclawChatId: "oc1",
-      agentId: "olivier",
+      agentId: "agent-a",
       canonical: "alice",
     });
     await reg.acquire({
       chatId: "c1",
       openclawChatId: "oc1",
-      agentId: "pissey", // re-key
+      agentId: "agent-b", // re-key
       canonical: "alice",
     });
     await tick(); // let the old consumer observe the closed connection
@@ -142,7 +142,7 @@ describe("SessionRegistry — body-routed keys + re-key", () => {
       .spyOn(OpenClawConnection, "connect")
       .mockImplementation(async () => fakeConn() as never);
     const reg = new SessionRegistry(config, {} as never);
-    const r = { chatId: "c1", openclawChatId: null, agentId: "olivier", canonical: "alice" };
+    const r = { chatId: "c1", openclawChatId: null, agentId: "agent-a", canonical: "alice" };
     const a = await reg.acquire(r);
     a.connection.close();
     const b = await reg.acquire(r);

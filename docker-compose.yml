@@ -7,7 +7,7 @@
 #
 # Two share styles — pick the one matching your deployment:
 #   (A) SHARED NAMED VOLUME (recommended when OpenClaw + bridge + Convex live in
-#       the SAME compose / container environment — your stated NAS target). The
+#       the SAME compose / container environment — the co-located topology). The
 #       OpenClaw service mounts `media-outbound:/home/node/.openclaw/media/outbound`
 #       (read-write) and the bridge mounts the SAME volume read-only. No host path.
 #   (B) HOST BIND (when media lives on an NFS export / host path shared across
@@ -50,13 +50,13 @@ services:
       BRIDGE_PORT: "8787"
     volumes:
       # (A) shared named volume — same as the OpenClaw service mounts (read-write
-      #     there, read-only here). This is the co-located NAS topology.
+      #     there, read-only here). This is the co-located topology.
       - media-outbound:/home/node/.openclaw/media/outbound:ro
       # (B) OR a host/NFS bind instead of the named volume above:
       # - ${OPENCLAW_MEDIA_OUTBOUND_HOST_DIR}:/home/node/.openclaw/media/outbound:ro
 
 volumes:
-  # Declared here for self-contained local testing. On the NAS, make this the
+  # Declared here for self-contained local testing. In production, make this the
   # SAME volume (or NFS) the OpenClaw container(s) write their outbound media to.
   media-outbound:
     external: false

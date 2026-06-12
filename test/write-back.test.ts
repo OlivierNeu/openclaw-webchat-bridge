@@ -20,7 +20,7 @@ describe("parsePatchBody", () => {
   // resolves; the parser requires it (no env fallback — Phase 2 prod fix).
   // The knob intent rides COMPLETE under `sessionSettings` — the same nested
   // shape as /send (one source of truth, P2-4); flat knob fields are gone.
-  const R = { agentId: "olivier", canonical: "alice" };
+  const R = { agentId: "agent-a", canonical: "alice" };
 
   it("parses a reasoning-only patch", () => {
     const body = parsePatchBody(
@@ -35,7 +35,7 @@ describe("parsePatchBody", () => {
       chatId: "c1",
       openclawChatId: "oc1",
       sessionSettings: { thinkingLevel: "low", model: null },
-      agentId: "olivier",
+      agentId: "agent-a",
       canonical: "alice",
       instanceName: null,
     });
@@ -93,7 +93,7 @@ describe("parsePatchBody", () => {
         JSON.stringify({
           chatId: "c1",
           sessionSettings: { thinkingLevel: "low" },
-          agentId: "olivier",
+          agentId: "agent-a",
         }),
       ),
     ).toBeNull(); // canonical still missing

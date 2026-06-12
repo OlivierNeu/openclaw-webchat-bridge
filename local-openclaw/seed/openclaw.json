@@ -79,18 +79,18 @@
     },
     "list": [
       {
-        "id": "olivier",
-        "workspace": "/home/node/.openclaw/workspace-olivier",
+        "id": "alice",
+        "workspace": "/home/node/.openclaw/workspace-alice",
         "identity": {
-          "name": "Olivier"
+          "name": "Alice"
         },
         "heartbeat": {}
       },
       {
-        "id": "pissey",
-        "workspace": "/home/node/.openclaw/workspace-pissey",
+        "id": "bob",
+        "workspace": "/home/node/.openclaw/workspace-bob",
         "identity": {
-          "name": "Pissey",
+          "name": "Bob",
           "emoji": "\u2694\ufe0f"
         },
         "heartbeat": {}
@@ -99,7 +99,7 @@
   },
   "auth": {
     "profiles": {
-      "openai-codex:olivier@lacneu.com": {
+      "openai-codex:user@example.com": {
         "provider": "openai-codex",
         "mode": "oauth"
       }

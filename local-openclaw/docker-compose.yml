@@ -1,10 +1,10 @@
-# Ephemeral LOCAL OpenClaw gateway — live-test + media-share bench (tasks #55/#52).
+# Ephemeral LOCAL OpenClaw gateway — live-test + media-share bench.
 #
 # VOLATILE by design: `reset.sh` wipes all state so every run starts PRISTINE
 # (previous tests can't leak into the next). Version-pinned via OPENCLAW_VERSION
-# (mount any tag on the fly). Based on the same image as the NAS
-# (neuolivier/openclaw-docker, cf. openclaw-notes/docker-compose.yml). NOT for
-# production — this is a throwaway bench Claude starts/stops itself.
+# (mount any tag on the fly). Uses the published OpenClaw gateway image
+# (override the repository with OPENCLAW_IMAGE if you build your own). NOT for
+# production — this is a throwaway bench an agent starts/stops itself.
 #
 # Auth: a LAN-bound gateway in a container (required for docker port-forward)
 # refuses `--auth none`, so we use TOKEN auth + automatic device pairing
@@ -15,13 +15,13 @@ services:
   # Optional one-shot seed of a minimal openclaw.json (agent + model) into the
   # fresh state volume BEFORE the gateway reads it. DISABLED by default: a minimal
   # hand-written config was rejected ("<root>: Invalid input" — the real schema is
-  # large, cf. openclaw-notes/instances/olivier/openclaw.json, 18 sections). The
+  # large, ~18 top-level sections on a real instance). The
   # gateway boots fine WITHOUT it (unconfigured) and the bridge still pairs +
   # operates; an agent/model needs a valid config (run `onboard`, or refine
   # seed/openclaw.json.example to pass the schema) + OPENROUTER_API_KEY. Enable by
   # uncommenting below + the `depends_on` on `openclaw`, with a VALID seed.
   # oc-seed:
-  #   image: neuolivier/openclaw-docker:openclaw-${OPENCLAW_VERSION:-2026.5.19}
+  #   image: ${OPENCLAW_IMAGE:-neuolivier/openclaw-docker}:openclaw-${OPENCLAW_VERSION:-2026.5.19}
   #   user: root
   #   volumes:
   #     - oc-state:/home/node/.openclaw
@@ -33,7 +33,7 @@ services:
   #   restart: "no"
 
   openclaw:
-    image: neuolivier/openclaw-docker:openclaw-${OPENCLAW_VERSION:-2026.5.19}
+    image: ${OPENCLAW_IMAGE:-neuolivier/openclaw-docker}:openclaw-${OPENCLAW_VERSION:-2026.5.19}
     container_name: oc-local-gateway
     restart: "no"
     # depends_on:
@@ -66,10 +66,10 @@ services:
     volumes:
       # Ephemeral gateway state — pristine each run (reset.sh removes the volume).
       - oc-state:/home/node/.openclaw
-      # SHARED outbound media: host bind so a bridge running on the Mac
+      # SHARED outbound media: host bind so a bridge running on the host
       # (OPENCLAW_MEDIA_OUTBOUND_DIR=./local-openclaw/media-outbound) reads the
-      # SAME files the gateway writes. The NAS uses a shared NAMED volume instead
-      # (docs/DEPLOYMENT.md) — same mechanism, different backing.
+      # SAME files the gateway writes. A production deployment typically uses a
+      # shared NAMED volume instead — same mechanism, different backing.
       - ./media-outbound:/home/node/.openclaw/media/outbound
       # Reorder wrapper over the image's buggy one (codex harness flag fix).
       - ./codex-yolo-wrapper.sh:/usr/local/bin/codex-yolo-wrapper.sh:ro
@@ -80,7 +80,7 @@ services:
       retries: 30
       start_period: 5s
 
-  # LOOPBACK FORWARDER (#61). The local bridge runs on the Mac HOST and reaches
+  # LOOPBACK FORWARDER (#61). The local bridge runs on the HOST and reaches
   # the gateway over plain ws://, so the containerised gateway sees a NON-loopback
   # peer (172.x) and rejects the connect as an UNTRUSTED transport
   # (`AUTH_TOKEN_MISMATCH` — device-token auth is gated to trusted transports:
@@ -88,8 +88,8 @@ services:
   # This socat sidecar SHARES the gateway's network namespace and forwards
   # :18790 → 127.0.0.1:18789, so the gateway sees the bridge's connection as
   # LOOPBACK (trusted) and the shared token authenticates. The host bridge sets
-  # OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18790. (Production/NAS uses wss instead —
-  # also a trusted transport — so it does NOT need this sidecar.)
+  # OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18790. (Production gateways use wss
+  # instead — also a trusted transport — so they do NOT need this sidecar.)
   oc-loopback:
     image: alpine/socat:latest
     container_name: oc-local-loopback

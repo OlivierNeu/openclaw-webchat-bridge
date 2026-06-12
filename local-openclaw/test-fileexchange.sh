@@ -9,14 +9,14 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-# ⚠ This test NEEDS the codex harness (real LLM turns). Standing guard from the
-# 2026-06-11 401 incident: two gateways on the SAME OpenAI account rotate each
-# other's oauth tokens out. Safe iff ~/.codex/auth.json is a DIFFERENT account
-# than the NAS instance (2026-06-11: local=xavier@jodoin.me, NAS=olivier@
-# lacneu.com → disjoint, OK). Opt in explicitly after checking identities.
+# ⚠ This test NEEDS the codex harness (real LLM turns). Standing guard against
+# the oauth-rotation footgun: two gateways on the SAME OpenAI account rotate
+# each other's oauth tokens out (401 "token invalidated"). The local codex
+# account MUST be a DIFFERENT OpenAI account than any production gateway.
+# Opt in explicitly after checking identities.
 if [[ "${OPENCLAW_CODEX_HARNESS:-0}" != "1" ]]; then
   echo "❌ refusing: codex harness required. After verifying ~/.codex/auth.json is"
-  echo "   a DIFFERENT OpenAI account than the NAS:  OPENCLAW_CODEX_HARNESS=1 $0 $*"
+  echo "   a DIFFERENT OpenAI account than any production gateway:  OPENCLAW_CODEX_HARNESS=1 $0 $*"
   exit 1
 fi
 VERSION="${1:?usage: ./test-fileexchange.sh <openclaw-version>}"
@@ -24,7 +24,14 @@ REPO="$(cd .. && pwd)"
 # Convex CLI runs from the WEBCHAT repo (bridge extracted in C3, no convex dep).
 WEBCHAT="${WEBCHAT_DIR:-$(cd ../../openclaw-webchat && pwd)}"
 cvx() { (cd "$WEBCHAT" && npx convex run "$@"); }
-CHAT="${FX_CHAT:-jx7f3n01v12282cqb9wanp0xex88ejqz}"
+# Target chat in YOUR Convex dev deployment (no committed default): a chat id
+# the bridge may write into, e.g. created via the webchat UI.
+CHAT="${FX_CHAT:-}"
+if [[ -z "$CHAT" ]]; then
+  echo "❌ FX_CHAT is required: set it to a chat id from YOUR Convex dev deployment,"
+  echo "   e.g.  FX_CHAT=<chatId> OPENCLAW_CODEX_HARNESS=1 $0 $*"
+  exit 1
+fi
 MEDIA_DIR="$(pwd)/media-outbound"
 PORT=18790
 fail(){ echo "❌ FAIL [$VERSION]: $1"; exit 1; }

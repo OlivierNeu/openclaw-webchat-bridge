@@ -22,7 +22,7 @@ import {
 } from "../src/server.js";
 import type { GatewayRequester } from "../src/conf.js";
 
-const R = { agentId: "olivier", canonical: "alice" };
+const R = { agentId: "agent-a", canonical: "alice" };
 
 /** Records sessions.patch calls in order; optionally fails the Nth call. */
 function mockGateway(failAtCall?: number) {

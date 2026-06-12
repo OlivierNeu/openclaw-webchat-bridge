@@ -19,16 +19,16 @@ describe("normalizeOpenClawAgent — live 6.1 RPC shape", () => {
     const agents = fixture.agents.map((a) =>
       normalizeOpenClawAgent(a, fixture.defaultId),
     );
-    const olivier = agents.find((a) => a?.agentId === "olivier")!;
-    expect(olivier).not.toBeNull();
-    expect(olivier.displayName).toBe("Olivier");
-    expect(olivier.model).toBe("openai/gpt-5.5");
-    expect(olivier.isDefaultOnInstance).toBe(true); // via defaultId, not a per-agent flag
+    const agentA = agents.find((a) => a?.agentId === "agent-a")!;
+    expect(agentA).not.toBeNull();
+    expect(agentA.displayName).toBe("Agent A");
+    expect(agentA.model).toBe("openai/gpt-5.5");
+    expect(agentA.isDefaultOnInstance).toBe(true); // via defaultId, not a per-agent flag
 
-    const pissey = agents.find((a) => a?.agentId === "pissey")!;
-    expect(pissey.emoji).toBe("⚔️"); // identity.emoji
-    expect(pissey.model).toBe("openai/gpt-5.5");
-    expect(pissey.isDefaultOnInstance).toBe(false);
+    const agentB = agents.find((a) => a?.agentId === "agent-b")!;
+    expect(agentB.emoji).toBe("⚔️"); // identity.emoji
+    expect(agentB.model).toBe("openai/gpt-5.5");
+    expect(agentB.isDefaultOnInstance).toBe(false);
   });
 
   test("CLI shape still works (id / identityName / model string / per-agent isDefault)", () => {

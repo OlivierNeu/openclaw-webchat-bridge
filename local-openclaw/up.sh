@@ -26,22 +26,26 @@ done
 echo "✅ gateway healthy on :${OPENCLAW_LOCAL_PORT:-18789}"
 
 # 4) CODEX HARNESS MODE (opt-in): inject the local codex login + seed so the
-# agent runs on the ChatGPT subscription. ⚠ FOOTGUN (2026-06-11 incident): two
-# gateways refreshing the SAME OpenAI account's oauth tokens rotate each other
-# out → 401 "token invalidated" (happened when this auth.json was COPIED to the
-# NAS). Safe ONLY because ~/.codex/auth.json is a DIFFERENT account than the
-# NAS instance (verified 2026-06-11: local=xavier@jodoin.me, NAS=olivier@
-# lacneu.com). Never copy this file to another gateway; re-check identities if
-# either login changes. Gated behind an explicit env var as a standing guard.
+# agent runs on the ChatGPT subscription. ⚠ FOOTGUN: two gateways refreshing
+# the SAME OpenAI account's oauth tokens rotate each other out → 401 "token
+# invalidated" (observed when an auth.json was copied to a second gateway).
+# The local codex account MUST be a DIFFERENT OpenAI account than any
+# production gateway. Never copy this file to another gateway; re-check
+# identities if either login changes. Gated behind an explicit env var as a
+# standing guard.
+# Seed: seed/openclaw.local.json (gitignored, your own agents/auth profile)
+# wins over the generic committed seed/openclaw.json.
 CODEX_AUTH="${CODEX_AUTH_FILE:-$HOME/.codex/auth.json}"
+SEED_FILE="seed/openclaw.json"
+[[ -f seed/openclaw.local.json ]] && SEED_FILE="seed/openclaw.local.json"
 if [[ "${OPENCLAW_CODEX_HARNESS:-0}" != "1" ]]; then
   echo "ℹ codex harness DISABLED (default). Gateway stays unconfigured: discovery,"
   echo "  sessions.patch/config/agents.files probes work; LLM turns do not."
   echo "  Enable with: OPENCLAW_CODEX_HARNESS=1 ./up.sh"
-  echo "  (safe iff ~/.codex/auth.json is a DIFFERENT OpenAI account than the NAS)"
-elif [[ -f "$CODEX_AUTH" && -f seed/openclaw.json ]]; then
-  echo "▶ enabling codex harness mode (reusing $CODEX_AUTH) …"
-  docker cp seed/openclaw.json oc-local-gateway:/home/node/.openclaw/openclaw.json
+  echo "  (safe iff ~/.codex/auth.json is a DIFFERENT OpenAI account than any production gateway)"
+elif [[ -f "$CODEX_AUTH" && -f "$SEED_FILE" ]]; then
+  echo "▶ enabling codex harness mode (reusing $CODEX_AUTH, seed: $SEED_FILE) …"
+  docker cp "$SEED_FILE" oc-local-gateway:/home/node/.openclaw/openclaw.json
   docker exec oc-local-gateway sh -c 'mkdir -p /home/node/.openclaw/.codex'
   docker cp "$CODEX_AUTH" oc-local-gateway:/home/node/.openclaw/.codex/auth.json
   docker exec -u root oc-local-gateway chown -R node:node \
@@ -49,7 +53,7 @@ elif [[ -f "$CODEX_AUTH" && -f seed/openclaw.json ]]; then
   docker restart oc-local-gateway >/dev/null
   echo "▶ waiting for reconfigured gateway …"
   until [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:${OPENCLAW_LOCAL_PORT:-18789}/health 2>/dev/null)" == "200" ]]; do sleep 2; done
-  echo "✅ codex harness ready (agent: olivier, model: openai/gpt-5.5 on your subscription)"
+  echo "✅ codex harness ready (agents from $SEED_FILE, turns run on your codex subscription)"
 else
   echo "ℹ codex auth or seed missing → gateway stays unconfigured (no agent turns; media-share still testable)."
 fi
@@ -87,8 +91,8 @@ cat <<EOF
 
 NOTE (#61): connect over :${OPENCLAW_LOOPBACK_PORT:-18790} (the oc-loopback sidecar), NOT :18789.
 The gateway only admits the shared token from a TRUSTED transport; :18790 forwards
-to the gateway's loopback so the host bridge is seen as loopback. The NAS uses wss
-(also trusted) and does not need this.
+to the gateway's loopback so the host bridge is seen as loopback. Production
+gateways use wss (also trusted) and do not need this.
 
 Token: ./.token   |   Shared media: ./media-outbound   |   Stop: ./down.sh   |   Wipe: ./reset.sh
 EOF

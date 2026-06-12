@@ -20,18 +20,18 @@ const baseSend = {
   text: "hello",
   clientMessageId: "cm1",
 };
-const R = { agentId: "pissey", canonical: "alice" };
+const R = { agentId: "agent-b", canonical: "alice" };
 
 describe("parseBodyRouting (required, no env fallback)", () => {
   it("extracts agentId + canonical + optional instanceName", () => {
     expect(
-      parseBodyRouting({ agentId: "pissey", canonical: "alice", instanceName: "admin" }),
-    ).toEqual({ agentId: "pissey", canonical: "alice", instanceName: "admin" });
+      parseBodyRouting({ agentId: "agent-b", canonical: "alice", instanceName: "admin" }),
+    ).toEqual({ agentId: "agent-b", canonical: "alice", instanceName: "admin" });
   });
 
   it("defaults instanceName to null when absent", () => {
-    expect(parseBodyRouting({ agentId: "pissey", canonical: "alice" })).toEqual({
-      agentId: "pissey",
+    expect(parseBodyRouting({ agentId: "agent-b", canonical: "alice" })).toEqual({
+      agentId: "agent-b",
       canonical: "alice",
       instanceName: null,
     });
@@ -39,9 +39,9 @@ describe("parseBodyRouting (required, no env fallback)", () => {
 
   it("returns null when agentId or canonical is missing/empty", () => {
     expect(parseBodyRouting({ canonical: "alice" })).toBeNull();
-    expect(parseBodyRouting({ agentId: "pissey" })).toBeNull();
+    expect(parseBodyRouting({ agentId: "agent-b" })).toBeNull();
     expect(parseBodyRouting({ agentId: "", canonical: "alice" })).toBeNull();
-    expect(parseBodyRouting({ agentId: "pissey", canonical: "" })).toBeNull();
+    expect(parseBodyRouting({ agentId: "agent-b", canonical: "" })).toBeNull();
     expect(parseBodyRouting({ agentId: 7, canonical: "alice" })).toBeNull();
   });
 });
@@ -51,7 +51,7 @@ describe("parseSendBody routing", () => {
     const body = parseSendBody(JSON.stringify({ ...baseSend, ...R, instanceName: "admin" }));
     expect(body).toMatchObject({
       chatId: "c1",
-      agentId: "pissey",
+      agentId: "agent-b",
       canonical: "alice",
       instanceName: "admin",
     });
@@ -67,7 +67,7 @@ describe("parseResetBody routing", () => {
     expect(parseResetBody(JSON.stringify({ chatId: "c1" }))).toBeNull();
     expect(parseResetBody(JSON.stringify({ chatId: "c1", ...R }))).toMatchObject({
       chatId: "c1",
-      agentId: "pissey",
+      agentId: "agent-b",
       canonical: "alice",
     });
   });

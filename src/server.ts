@@ -21,14 +21,34 @@ import { timingSafeEqual } from "node:crypto";
 import type { BridgeConfig } from "./config.js";
 import { idempotencyKey, OpenClawConnection } from "./providers/openclaw/openclaw-client.js";
 import { classifyGatewayError } from "./core/dispatch-errors.js";
-import { gatewayHostOf, type HealthRegistry, type TargetRef } from "./core/health.js";
-import type { ConvexWriter, SessionMetaReport } from "./convex-writer.js";
-import type { SessionRegistry, BridgeSession, SessionRouting } from "./session.js";
 import {
+  gatewayHostOf,
+  type HealthRegistry,
+  type HealthSnapshot,
+  type TargetHealth,
+  type TargetRef,
+} from "./core/health.js";
+import {
+  BRIDGE_VERSION,
+  COMPAT_MANIFEST,
+  PROTOCOL_VERSION,
+  resolveCapabilities,
+} from "./compat.js";
+import type { ConvexWriter, SessionMetaReport } from "./convex-writer.js";
+import type {
+  SessionRegistry,
+  BridgeSession,
+  SessionRouting,
+  LiveTarget,
+} from "./session.js";
+import {
+  defaultsApplied,
+  extractAgentDefaults,
   parseAgentFilesBody,
   parseConfigDefaultsBody,
   performAgentFilesOp,
   performConfigDefaultsOp,
+  type ConfigDefaultsBody,
   type GatewayRequester,
 } from "./conf.js";
 
@@ -681,6 +701,34 @@ async function withOperatorConnection<T>(
   }
 }
 
+/**
+ * GATEWAY-RESTART recovery for `/config-defaults` set (live-protocol finding,
+ * 2026.6.5): `config.patch` can make the gateway restart in-process
+ * (`restartReason=config.patch`), killing the operator socket before the
+ * response is read EVEN THOUGH THE WRITE APPLIED — without this, the admin
+ * sees an error for a save that succeeded. Reconnect on a bounded backoff and
+ * CONFIRM by read-back; only a confirmed match is reported as success.
+ */
+async function confirmDefaultsAfterRestart(
+  config: BridgeConfig,
+  body: Extract<ConfigDefaultsBody, { op: "set" }>,
+): Promise<{ thinkingDefault: string | null; fastModeDefault: boolean | null } | null> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await new Promise((r) => setTimeout(r, 2_000));
+    try {
+      const defaults = await withOperatorConnection(config, async (conn) => {
+        const res = await conn.request("config.get", {}, 8_000);
+        return extractAgentDefaults(res.payload);
+      });
+      // The gateway is back: the read-back is authoritative either way.
+      return defaultsApplied(body, defaults) ? defaults : null;
+    } catch {
+      // Still restarting — keep polling within the bound (~16s).
+    }
+  }
+  return null;
+}
+
 // --- Agent discovery (provider-agnostic, normalized for the app) -------------
 
 /** A normalized, provider-agnostic agent descriptor for the `/agents` API. The
@@ -789,6 +837,78 @@ function openclawCapabilities() {
   };
 }
 
+/**
+ * One `/capabilities` target: a live session's resolved compat view. `key` is
+ * the operator canonical (same bounded keying as /health targets — never a
+ * chat id: the endpoint is unauthenticated).
+ */
+export interface CapabilityTarget {
+  key: string;
+  instanceName: string | null;
+  provider: "openclaw";
+  agentId: string;
+  gatewayVersion: string | null;
+  capabilities: Record<string, boolean>;
+  versionBeyondValidated?: true;
+}
+
+/**
+ * Project the registry's live sessions onto `/capabilities` targets. Deduped
+ * by canonical (mono-gateway: every session shares the same gateway version
+ * anyway; last live session wins). Pure — exported for tests.
+ */
+export function buildCapabilityTargets(
+  live: LiveTarget[],
+  instanceName: string | null,
+): CapabilityTarget[] {
+  const byKey = new Map<string, LiveTarget>();
+  for (const t of live) byKey.set(t.canonical, t);
+  return [...byKey.values()].map((t) => {
+    const resolved = resolveCapabilities("openclaw", t.gatewayVersion);
+    const target: CapabilityTarget = {
+      key: t.canonical,
+      instanceName,
+      provider: "openclaw",
+      agentId: t.agentId,
+      gatewayVersion: t.gatewayVersion,
+      capabilities: resolved.capabilities,
+    };
+    if (resolved.versionBeyondValidated) target.versionBeyondValidated = true;
+    return target;
+  });
+}
+
+/**
+ * Enrich the `/health` snapshot with the compat versions — STRICTLY additive
+ * (every pre-existing field is preserved verbatim; the Convex poller's parser
+ * must keep working unchanged). Each target gains `gatewayVersion`, looked up
+ * from the live session sharing its canonical (null when none is live — the
+ * bridge is lazy, a drained target keeps its history but has no socket to ask).
+ * Pure — exported for tests.
+ */
+export interface EnrichedHealthSnapshot extends Omit<HealthSnapshot, "targets"> {
+  bridgeVersion: string;
+  protocolVersion: number;
+  targets: (TargetHealth & { gatewayVersion: string | null })[];
+}
+
+export function enrichHealthSnapshot(
+  snapshot: HealthSnapshot,
+  live: LiveTarget[],
+): EnrichedHealthSnapshot {
+  const versionByCanonical = new Map<string, string | null>();
+  for (const t of live) versionByCanonical.set(t.canonical, t.gatewayVersion);
+  return {
+    ...snapshot,
+    bridgeVersion: BRIDGE_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    targets: snapshot.targets.map((t) => ({
+      ...t,
+      gatewayVersion: versionByCanonical.get(t.canonical) ?? null,
+    })),
+  };
+}
+
 export interface BridgeServerDeps {
   config: BridgeConfig;
   registry: SessionRegistry;
@@ -837,7 +957,9 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
     if (req.method === "GET" && req.url === "/health") {
       // Health is UNAUTHENTICATED on purpose (liveness + a non-secret state
       // snapshot — codes + host only, never tokens). The Convex poller reads it.
-      sendJson(res, 200, health.snapshot());
+      // Additive compat fields: bridgeVersion + protocolVersion at the top,
+      // gatewayVersion per target (from the live session's handshake capture).
+      sendJson(res, 200, enrichHealthSnapshot(health.snapshot(), registry.listLive()));
       return;
     }
 
@@ -849,6 +971,13 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         // this to correlate capabilities + the M2 routing guard.
         instanceName: config.instanceName,
         capabilities: openclawCapabilities(),
+        // Compat manifest (additive): the single source of truth for bridge/
+        // protocol versions + per-provider validated capability tables, plus
+        // the version-resolved view of every LIVE session.
+        bridgeVersion: BRIDGE_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        compat: COMPAT_MANIFEST,
+        targets: buildCapabilityTargets(registry.listLive(), config.instanceName),
       });
       return;
     }
@@ -1028,6 +1157,23 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         sendJson(res, result.status, result.body);
       } catch (err) {
         const code = classifyGatewayError(err);
+        if (code === "GATEWAY_DISCONNECTED" && body.op === "set") {
+          // The patch may have APPLIED and only the response was lost to a
+          // config-triggered gateway restart — reconnect and confirm before
+          // reporting failure (see confirmDefaultsAfterRestart).
+          const confirmed = await confirmDefaultsAfterRestart(config, body);
+          if (confirmed !== null) {
+            console.error(
+              "bridge /config-defaults: write confirmed after gateway restart",
+            );
+            sendJson(res, 200, {
+              ok: true,
+              defaults: confirmed,
+              gatewayRestarted: true,
+            });
+            return;
+          }
+        }
         if (code === "INVALID_REQUEST" && body.op === "set") {
           // The config.patch params shape ({raw, baseHash}) is bench-verified
           // on 2026.6.5 — an INVALID_REQUEST here most likely means the shape
