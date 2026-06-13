@@ -133,21 +133,42 @@ function constantTimeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-/** Read the request body up to `maxBytes`, rejecting anything larger. */
+/** Thrown by `readBody` when the body exceeds the cap (mapped to a clean 413). */
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super("payload too large");
+    this.name = "BodyTooLargeError";
+  }
+}
+
+/**
+ * Read the request body up to `maxBytes`, rejecting anything larger. On
+ * overflow we STOP buffering and reject, but deliberately do NOT `destroy()` the
+ * socket: tearing it down before the handler writes the 413 made the client
+ * (Convex `fetch`) see an ECONNRESET — surfaced as a misleading
+ * `BRIDGE_UNREACHABLE` instead of an honest "too large". We drain the rest with
+ * `resume()` so the response flushes cleanly; the cap itself bounds memory.
+ */
 function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let over = false;
     req.on("data", (chunk: Buffer) => {
+      if (over) return;
       total += chunk.length;
       if (total > maxBytes) {
-        reject(new Error("payload too large"));
-        req.destroy();
+        over = true;
+        chunks.length = 0; // release the buffered prefix
+        req.resume(); // drain remaining bytes without buffering
+        reject(new BodyTooLargeError());
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      if (!over) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
     req.on("error", reject);
   });
 }
@@ -1090,7 +1111,10 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
     try {
       raw = await readBody(req, config.maxBodyBytes);
     } catch {
-      sendJson(res, 413, { ok: false, error: "payload too large" });
+      // Structured `{error:{code}}` (like the 502 path) so Convex's readErrorCode
+      // surfaces an honest cause instead of a generic failed dispatch. Normally
+      // unreachable: the cap (32 MiB) clears Convex's 20 MiB-raw attachment ceiling.
+      sendJson(res, 413, { ok: false, error: { code: "payload_too_large" } });
       return;
     }
 

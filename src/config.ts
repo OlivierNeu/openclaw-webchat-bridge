@@ -76,7 +76,15 @@ export interface BridgeConfig {
   bridgeSharedSecret: string;
   /** Port the bridge HTTP server listens on. */
   port: number;
-  /** Max request body size (bytes) accepted by `POST /send`. */
+  /**
+   * Max request body size (bytes) accepted by `POST /send`. MUST exceed the
+   * base64-encoded attachment ceiling: Convex caps each inbound attachment at
+   * 20 MiB RAW (`INBOUND_MAX_BYTES` in convex/bridge.ts), and base64 inflates by
+   * ~4/3, so a single max attachment is ~26.7 MiB on the wire — plus the JSON
+   * envelope (text, routing). The default (32 MiB) clears that with margin; an
+   * undersized cap silently 413s every non-trivial file import (the body never
+   * reaches `performSend`). Override via `BRIDGE_MAX_BODY_BYTES`.
+   */
   maxBodyBytes: number;
 }
 
@@ -172,7 +180,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
       convexIngestSecret: requireEnv("BRIDGE_INGEST_SECRET"),
       bridgeSharedSecret: requireEnv("BRIDGE_SHARED_SECRET"),
       port: parseIntEnv("BRIDGE_PORT", 8787),
-      maxBodyBytes: parseIntEnv("BRIDGE_MAX_BODY_BYTES", 1_048_576),
+      // 32 MiB: clears one base64-encoded 20 MiB attachment (~26.7 MiB) plus the
+      // JSON envelope. The old 1 MiB default 413'd any file whose base64 topped
+      // ~1 MiB (~750 KiB raw) — the inbound-import prod regression.
+      maxBodyBytes: parseIntEnv("BRIDGE_MAX_BODY_BYTES", 33_554_432),
     };
   } finally {
     process.env = prev;
