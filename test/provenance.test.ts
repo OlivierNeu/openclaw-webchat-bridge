@@ -148,7 +148,7 @@ describe("parseProvenanceReport (bounded, field-by-field)", () => {
         lightragMode: "mix",
       },
     });
-    expect(part!.items[0].file_name).toBe("bench-compliance-report.pdf");
+    expect(part!.items[0]!.file_name).toBe("bench-compliance-report.pdf");
   });
 
   it("rejects off-contract reports (version, identity, group, items)", () => {
@@ -172,7 +172,7 @@ describe("parseProvenanceReport (bounded, field-by-field)", () => {
       ...MEMORY_REPORT,
       items: [{ id: "m1", text: "x".repeat(MAX_ITEM_TEXT_CHARS + 500) }],
     };
-    expect(parseProvenanceReport(long)!.items[0].text).toHaveLength(
+    expect(parseProvenanceReport(long)!.items[0]!.text).toHaveLength(
       MAX_ITEM_TEXT_CHARS,
     );
 
@@ -195,7 +195,7 @@ describe("parseProvenanceReport (bounded, field-by-field)", () => {
       items: [{ id: "m1", smuggledToo: "x" }],
     })!;
     expect("smuggled" in part).toBe(false);
-    expect("smuggledToo" in part.items[0]).toBe(false);
+    expect("smuggledToo" in part.items[0]!).toBe(false);
   });
 });
 
@@ -285,7 +285,7 @@ describe("RunManager provenance pipeline", () => {
     const parts = writer.provenanceParts();
     expect(parts.map((p) => p.group)).toEqual(["memory", "documents"]);
     // startAssistant precedes the parts (the message must exist first).
-    expect(writer.calls[0][0]).toBe("startAssistant");
+    expect(writer.calls[0]![0]).toBe("startAssistant");
   });
 
   it("PRE-TURN stash from a DIFFERENT run never leaks into this turn", async () => {
