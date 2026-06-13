@@ -31,6 +31,9 @@ export interface ReasoningPart {
   text: string;
 }
 
+// The provenance part shape lives in core/provenance.ts (pure contract module).
+export type { ProvenancePart } from "./core/provenance.js";
+
 export type FinalizeStatus = "complete" | "error" | "aborted";
 
 /**
@@ -47,6 +50,11 @@ export interface ConvexWriter {
   setSnapshot(messageId: string, text: string): Promise<void>;
   /** tool.status -> internal.stream.addPart(kind:tool). */
   addToolPart(messageId: string, part: ToolPart): Promise<void>;
+  /** plugin provenance report -> internal.stream.addPart(kind:provenance). */
+  addProvenancePart(
+    messageId: string,
+    part: import("./core/provenance.js").ProvenancePart,
+  ): Promise<void>;
   /**
    * media -> fetch bytes for `path`, store in Convex storage, then
    * internal.stream.addPart(kind:media,storageId). Resolution is behind the
@@ -108,7 +116,11 @@ type IngestOp =
   | { op: "startAssistant"; chatId: string; runId: string | null }
   | { op: "appendDelta"; messageId: string; text: string }
   | { op: "setSnapshot"; messageId: string; text: string }
-  | { op: "addPart"; messageId: string; part: ToolPart }
+  | {
+      op: "addPart";
+      messageId: string;
+      part: ToolPart | import("./core/provenance.js").ProvenancePart;
+    }
   // Outbound media is a 3-step, base64-free flow (Convex upload URL pattern):
   //   1. getUploadUrl -> Convex `ctx.storage.generateUploadUrl()` (no size limit)
   //   2. the bridge STREAMS the raw file bytes straight to that URL (not an ingest
@@ -307,6 +319,14 @@ export class HttpConvexWriter implements ConvexWriter {
   }
 
   async addToolPart(messageId: string, part: ToolPart): Promise<void> {
+    await this.flushDelta(messageId);
+    await this.post({ op: "addPart", messageId, part });
+  }
+
+  async addProvenancePart(
+    messageId: string,
+    part: import("./core/provenance.js").ProvenancePart,
+  ): Promise<void> {
     await this.flushDelta(messageId);
     await this.post({ op: "addPart", messageId, part });
   }

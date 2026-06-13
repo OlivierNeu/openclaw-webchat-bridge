@@ -22,6 +22,10 @@
 
 import type { NormalizedEvent } from "./events.js";
 import type { ConvexWriter, FinalizeStatus, ToolPart } from "../convex-writer.js";
+import {
+  MAX_PROVENANCE_PARTS_PER_TURN,
+  type ProvenancePart,
+} from "./provenance.js";
 
 const TERMINAL_STATUS: Record<string, FinalizeStatus> = {
   final: "complete",
@@ -45,6 +49,9 @@ export class TurnSink {
   private pendingFinalText = "";
   private pendingFinalError: string | null = null;
   private hasPendingFinal = false;
+  // Per-turn provenance budget: a misbehaving plugin (or several) must never
+  // turn the sources affordance into a flood of parts.
+  private provenanceCount = 0;
 
   constructor(chatId: string, writer: ConvexWriter) {
     this.chatId = chatId;
@@ -66,6 +73,7 @@ export class TurnSink {
     this.pendingFinalText = "";
     this.pendingFinalError = null;
     this.hasPendingFinal = false;
+    this.provenanceCount = 0;
     this.turnActive = true;
     this.messageId = await this.writer.startAssistant(this.chatId, ackRunId);
   }
@@ -98,6 +106,17 @@ export class TurnSink {
             ...(event.output !== undefined ? { output: event.output } : {}),
           };
           await this.writer.addToolPart(messageId, part);
+          break;
+        }
+        case "provenance": {
+          // Already validated + bounded by core/provenance.parseProvenanceReport
+          // (the only producer of this event type). Per-turn cap as the belt.
+          if (this.provenanceCount >= MAX_PROVENANCE_PARTS_PER_TURN) break;
+          this.provenanceCount++;
+          await this.writer.addProvenancePart(
+            messageId,
+            event.part as ProvenancePart,
+          );
           break;
         }
         case "media": {

@@ -21,6 +21,7 @@ import { RunManager } from "../src/providers/openclaw/run-manager.js";
 import type {
   ConvexWriter,
   FinalizeStatus,
+  ProvenancePart,
   ToolPart,
 } from "../src/convex-writer.js";
 import { BASE_RECV_TIMEOUT } from "../src/providers/openclaw/normalizer.js";
@@ -48,6 +49,7 @@ type Call =
   | ["appendDelta", string, string]
   | ["setSnapshot", string, string]
   | ["addToolPart", string, ToolPart]
+  | ["addProvenancePart", string, ProvenancePart]
   | ["addMedia", string, { filename: string; path: string }]
   | ["finalize", string, FinalizeStatus, string, string | null];
 
@@ -71,6 +73,12 @@ class FakeWriter implements ConvexWriter {
   }
   async addToolPart(messageId: string, part: ToolPart): Promise<void> {
     this.calls.push(["addToolPart", messageId, part]);
+  }
+  async addProvenancePart(
+    messageId: string,
+    part: ProvenancePart,
+  ): Promise<void> {
+    this.calls.push(["addProvenancePart", messageId, part]);
   }
   async addMedia(
     messageId: string,

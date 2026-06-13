@@ -27,12 +27,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Free the suite's ports up-front: a stray bridge/stub from an earlier manual
+# session would EADDRINUSE the fresh one and fail the whole run spuriously.
+for port in "$BRIDGE_PORT" "$STUB_PORT"; do
+  STALE="$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -n "$STALE" ]] && { echo "▶ freeing :$port (stale pid $STALE)"; kill $STALE 2>/dev/null; sleep 1; }
+done
+
 echo "════════ live-protocol — OpenClaw $VERSION ════════"
 
 # 1) Pinned, deterministic gateway: reset (wipe) + up WITHOUT the codex harness.
 ./reset.sh >/dev/null 2>&1 || true
 OPENCLAW_VERSION="$VERSION" OPENCLAW_CODEX_HARNESS=0 ./up.sh >/tmp/proto-up.log 2>&1 \
   || { echo "❌ up.sh failed (see /tmp/proto-up.log)"; exit 1; }
+
+# 1b) Provenance contract fixture (C18): the probe plugin emits deterministic
+# provenance/v1 reports every turn (docs/PROVENANCE_CONTRACT.md in the webchat
+# repo). Version-aware: on an SDK without emitAgentEvent the probe logs a
+# marker and stays silent — the suite reads gateway logs to pick the branch.
+./install-provenance-probe.sh >/tmp/proto-probe.log 2>&1 \
+  || { echo "❌ install-provenance-probe.sh failed (see /tmp/proto-probe.log)"; exit 1; }
 
 # 2) Fresh bridge build (the suite tests the CURRENT source).
 ( cd "$REPO" && npm run build >/tmp/proto-build.log 2>&1 ) \

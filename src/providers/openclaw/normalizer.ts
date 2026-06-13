@@ -43,6 +43,10 @@ import {
   EVENT_MEDIA,
   type BridgeEvent,
 } from "../../core/events.js";
+import {
+  isProvenanceStream,
+  parseProvenanceReport,
+} from "../../core/provenance.js";
 
 // The normalized event vocabulary now lives in core/events.ts (the shared
 // provider contract). Re-export it from the OpenClaw normalizer so existing
@@ -519,6 +523,19 @@ export class Normalizer {
       // the turn ends up holding a bare ack (wantsHistoryRecovery below).
       if (data.kind === "tool" && data.name === "message") {
         this.sawMessageToolItem = true;
+      }
+      return;
+    }
+    if (isProvenanceStream(stream)) {
+      // Provenance contract (openclaw-webchat docs/PROVENANCE_CONTRACT.md):
+      // a context-injecting plugin reports what it fed the LLM on
+      // `<pluginId>.provenance` (gateway-scoped stream, emitter identity
+      // stamped into data). Valid reports become kind:"provenance" parts on
+      // this turn's message; anything off-contract drops HERE — bounded,
+      // never able to break a turn.
+      const part = parseProvenanceReport(data);
+      if (part !== null) {
+        events.push({ type: "provenance", part });
       }
     }
   }

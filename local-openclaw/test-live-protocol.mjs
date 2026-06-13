@@ -20,6 +20,7 @@
 // version capture, ingest ops, error classification), never model output.
 
 import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, arr) => {
@@ -384,6 +385,56 @@ await check(`C16 /compact: ${can("sessionCompact") ? "bounded outcome on a live 
   if (status === 502) {
     assert(typeof json?.error?.code === "string", "classified error code");
   }
+});
+
+await check("C18 provenance contract: plugin reports become kind:provenance ingest parts", async () => {
+  // The provenance-probe plugin (installed by the wrapper) emits TWO
+  // deterministic provenance/v1 reports per turn on its gateway-scoped stream
+  // "provenance-probe.provenance" — the EXACT contract real memory/document
+  // plugins implement. The bridge must turn them into addPart ops with
+  // kind:"provenance" on this turn's assistant message.
+  let gatewayLog = "";
+  try {
+    gatewayLog = execSync("docker logs oc-local-gateway --since 10m 2>&1", {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch {
+    /* docker unavailable: fall through to the data assertion below */
+  }
+  const probeEmitted = gatewayLog.includes("[provenance-probe] emitted");
+  const sdkLacks = gatewayLog.includes("[provenance-probe] sdk-lacks-emitAgentEvent");
+  const provParts = ingestOps()
+    .filter((o) => o.op === "addPart" && o.part?.kind === "provenance")
+    .map((o) => o.part);
+  if (sdkLacks) {
+    // Old plugin SDK: the contract DEGRADES to silence — no parts, no error.
+    assertEq(provParts.length, 0, "no parts on a no-emit gateway");
+    return;
+  }
+  assert(probeEmitted, "probe never emitted (plugin not loaded?)");
+  await waitFor(
+    "provenance ingest parts",
+    async () =>
+      ingestOps().filter((o) => o.op === "addPart" && o.part?.kind === "provenance")
+        .length >= 2,
+    15_000,
+  );
+  const parts = ingestOps()
+    .filter((o) => o.op === "addPart" && o.part?.kind === "provenance")
+    .map((o) => o.part);
+  const groups = parts.map((p) => p.group).sort();
+  assertEq(groups, ["documents", "memory"], "one part per probe report group");
+  for (const p of parts) {
+    assertEq(p.v, 1, "contract version");
+    assertEq(p.pluginId, "provenance-probe", "gateway-stamped emitter");
+    assert(Array.isArray(p.items) && p.items.length > 0, "items present");
+  }
+  const memory = parts.find((p) => p.group === "memory");
+  assertEq(memory.items[0].id, "mem_bench_001", "deterministic memory item");
+  const docs = parts.find((p) => p.group === "documents");
+  assertEq(docs.items[0].file_name, "bench-compliance-report.pdf", "deterministic doc item");
+  assertEq(docs.retrieval?.lightragMode, "mix", "lightrag mode lifted");
 });
 
 await check("C17 final: bridge alive and consistent after the whole run", async () => {

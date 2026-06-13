@@ -12,6 +12,11 @@
 import { Normalizer } from "./normalizer.js";
 import { TurnSink } from "../../core/turn-sink.js";
 import type { ConvexWriter } from "../../convex-writer.js";
+import {
+  MAX_PROVENANCE_PARTS_PER_TURN,
+  parseProvenanceFrame,
+  type ProvenancePart,
+} from "../../core/provenance.js";
 
 /**
  * Drives one OpenClaw session's normalized stream into Convex (via TurnSink).
@@ -35,8 +40,16 @@ export class RunManager {
   private frameTally = new Map<string, number>();
   private frameSampled = new Set<string>();
   private tallyDumped = false;
+  private readonly sessionKey: string;
+  // PRE-TURN provenance stash: context-injecting plugins report at
+  // prompt-build, which RACES the chat.send ack -> beginTurn window where
+  // feed() drops everything (sink inactive). Stash by runId; beginTurn flushes
+  // ONLY the entries matching the ack's runId (stale runs never leak into a
+  // later turn). Bounded by the same per-turn cap as the sink.
+  private pendingProvenance: { runId: string; part: ProvenancePart }[] = [];
 
   constructor(chatId: string, sessionKey: string, writer: ConvexWriter) {
+    this.sessionKey = sessionKey;
     this.normalizer = new Normalizer(sessionKey);
     this.sink = new TurnSink(chatId, writer);
   }
@@ -114,11 +127,29 @@ export class RunManager {
       this.normalizer.noteRunStarted(ackRunId, now);
     }
     await this.sink.beginTurn(ackRunId);
+    // Flush the pre-turn provenance stash for THIS run only; entries from any
+    // other run (a failed earlier dispatch, a foreign run) are dropped here.
+    const matched = ackRunId
+      ? this.pendingProvenance.filter((p) => p.runId === ackRunId)
+      : [];
+    this.pendingProvenance = [];
+    if (matched.length > 0) {
+      await this.sink.apply(matched.map((p) => ({ type: "provenance", part: p.part })));
+    }
   }
 
   /** Feed one raw gateway frame; apply the resulting events to Convex. */
   async feed(frame: unknown, now: number): Promise<void> {
     if (!this.sink.active) {
+      // Inactive window (pre-ack / between turns): the ONLY thing we keep is a
+      // provenance report for an upcoming run — see pendingProvenance above.
+      const stashed = parseProvenanceFrame(frame, this.sessionKey);
+      if (
+        stashed !== null &&
+        this.pendingProvenance.length < MAX_PROVENANCE_PARTS_PER_TURN
+      ) {
+        this.pendingProvenance.push(stashed);
+      }
       return;
     }
     this.tallyFrame(frame);
