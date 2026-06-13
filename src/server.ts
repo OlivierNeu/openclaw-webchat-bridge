@@ -688,12 +688,14 @@ async function performCompact(session: BridgeSession): Promise<void> {
 async function withOperatorConnection<T>(
   config: BridgeConfig,
   fn: (conn: OpenClawConnection) => Promise<T>,
+  onVersion?: (v: string | null) => void,
 ): Promise<T> {
   const conn = await OpenClawConnection.connect(
     config.openclawGatewayUrl,
     config.openclawToken,
     config.deviceIdentity,
   );
+  onVersion?.(conn.gatewayVersion);
   try {
     return await fn(conn);
   } finally {
@@ -789,12 +791,14 @@ export function normalizeOpenClawAgent(
  *  pollutes the per-chat session map. Mono-tenant: uses the configured gateway. */
 async function discoverAgents(
   config: BridgeConfig,
+  onVersion?: (v: string | null) => void,
 ): Promise<{ agents: NormalizedAgent[]; rawCount: number }> {
   const conn = await OpenClawConnection.connect(
     config.openclawGatewayUrl,
     config.openclawToken,
     config.deviceIdentity,
   );
+  onVersion?.(conn.gatewayVersion);
   try {
     const res = (await conn.request("agents.list", {}, 10_000)) as {
       payload?: unknown;
@@ -860,10 +864,11 @@ export interface CapabilityTarget {
 export function buildCapabilityTargets(
   live: LiveTarget[],
   instanceName: string | null,
+  fallbackVersion: string | null = null,
 ): CapabilityTarget[] {
   const byKey = new Map<string, LiveTarget>();
   for (const t of live) byKey.set(t.canonical, t);
-  return [...byKey.values()].map((t) => {
+  const targets = [...byKey.values()].map((t) => {
     const resolved = resolveCapabilities("openclaw", t.gatewayVersion);
     const target: CapabilityTarget = {
       key: t.canonical,
@@ -876,6 +881,32 @@ export function buildCapabilityTargets(
     if (resolved.versionBeyondValidated) target.versionBeyondValidated = true;
     return target;
   });
+  // ALWAYS surface the SERVED instance, even with NO live chat session (BUG-1):
+  // the per-session targets above are empty whenever no chat is open at the
+  // compat poll (lazy bridge / process restart / idle), which made a perfectly
+  // supported gateway resolve to "unknown version" → AgentFiles/ChatDefaults
+  // gated off. The bridge contacts this same gateway on every discovery poll
+  // and captures `server.version` at handshake, so `fallbackVersion` is a
+  // reliable last-known version for the served instance. Only added when no
+  // live target already covers it (a live session is always more specific).
+  if (
+    instanceName &&
+    fallbackVersion &&
+    !targets.some((t) => t.instanceName === instanceName)
+  ) {
+    const resolved = resolveCapabilities("openclaw", fallbackVersion);
+    const synthetic: CapabilityTarget = {
+      key: instanceName,
+      instanceName,
+      provider: "openclaw",
+      agentId: "",
+      gatewayVersion: fallbackVersion,
+      capabilities: resolved.capabilities,
+    };
+    if (resolved.versionBeyondValidated) synthetic.versionBeyondValidated = true;
+    targets.push(synthetic);
+  }
+  return targets;
 }
 
 /**
@@ -936,6 +967,15 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
   // — honest liveness, no longer a static env claim. Keyed by canonical so the
   // entry count stays bounded on a mono-instance bridge.
   const gatewayHost = gatewayHostOf(config.openclawGatewayUrl);
+  // Last gateway version seen on ANY connection (discovery / operator / live).
+  // Process-lifetime, per-server closure (NOT module-level — test servers must
+  // stay isolated). Feeds the served-instance fallback target in /capabilities
+  // so a supported gateway is never gated as "unknown version" just because no
+  // chat session happens to be live at the compat poll (BUG-1).
+  let lastGatewayVersion: string | null = null;
+  const noteGatewayVersion = (v: string | null): void => {
+    if (typeof v === "string" && v.length > 0) lastGatewayVersion = v;
+  };
   const targetRef = (agentId: string, canonical: string): TargetRef => ({
     key: canonical,
     canonical,
@@ -977,7 +1017,17 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         bridgeVersion: BRIDGE_VERSION,
         protocolVersion: PROTOCOL_VERSION,
         compat: COMPAT_MANIFEST,
-        targets: buildCapabilityTargets(registry.listLive(), config.instanceName),
+        // Refresh the fallback from any currently-live session first, then build
+        // (live targets win; the served-instance fallback fills the no-session
+        // gap — see buildCapabilityTargets).
+        targets: (() => {
+          for (const t of registry.listLive()) noteGatewayVersion(t.gatewayVersion);
+          return buildCapabilityTargets(
+            registry.listLive(),
+            config.instanceName,
+            lastGatewayVersion,
+          );
+        })(),
       });
       return;
     }
@@ -997,7 +1047,7 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         "instance",
       );
       try {
-        const { agents, rawCount } = await discoverAgents(config);
+        const { agents, rawCount } = await discoverAgents(config, noteGatewayVersion);
         // `count` (raw gateway agent count) lets the Convex poller distinguish a
         // genuinely empty gateway from normalizer shape-drift (agents cache P2).
         sendJson(res, 200, {
@@ -1123,8 +1173,10 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         return;
       }
       try {
-        const result = await withOperatorConnection(config, (conn) =>
-          performAgentFilesOp(conn, body),
+        const result = await withOperatorConnection(
+          config,
+          (conn) => performAgentFilesOp(conn, body),
+          noteGatewayVersion,
         );
         sendJson(res, result.status, result.body);
       } catch (err) {
@@ -1151,8 +1203,10 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         return;
       }
       try {
-        const result = await withOperatorConnection(config, (conn) =>
-          performConfigDefaultsOp(conn, body),
+        const result = await withOperatorConnection(
+          config,
+          (conn) => performConfigDefaultsOp(conn, body),
+          noteGatewayVersion,
         );
         sendJson(res, result.status, result.body);
       } catch (err) {

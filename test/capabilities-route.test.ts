@@ -210,4 +210,36 @@ describe("buildCapabilityTargets (live-session projection)", () => {
     );
     expect(targets.map((t) => t.key).sort()).toEqual(["u-alice", "u-bob"]);
   });
+
+  // BUG-1: no live chat session at the compat poll must NOT make a supported
+  // gateway resolve to "unknown version". The served instance gets a fallback
+  // target from the last gateway version seen on any connection (discovery).
+  test("no live session + fallback version: synthetic served-instance target", () => {
+    const targets = buildCapabilityTargets([], "primary", "2026.6.5");
+    expect(targets).toHaveLength(1);
+    const t = targets[0]!;
+    expect(t.instanceName).toBe("primary");
+    expect(t.key).toBe("primary");
+    expect(t.gatewayVersion).toBe("2026.6.5");
+    // Full 6.5 row -> agentFiles/configDefaults resolve TRUE (no longer gated).
+    expect(t.capabilities.agentFiles).toBe(true);
+    expect(t.capabilities.configDefaults).toBe(true);
+  });
+
+  test("no live session + NO fallback version: stays empty (honest unknown)", () => {
+    expect(buildCapabilityTargets([], "primary", null)).toEqual([]);
+  });
+
+  test("a live session for the served instance SUPPRESSES the fallback", () => {
+    // The live target is more specific; the synthetic one must not duplicate it.
+    const targets = buildCapabilityTargets([LIVE("2026.6.1")], "primary", "2026.6.5");
+    expect(targets).toHaveLength(1);
+    expect(targets[0]!.key).toBe("u-alice");
+    expect(targets[0]!.gatewayVersion).toBe("2026.6.1");
+  });
+
+  test("fallback version beyond maxValidated flags the synthetic target", () => {
+    const t = buildCapabilityTargets([], "primary", "2026.9.9")[0]!;
+    expect(t.versionBeyondValidated).toBe(true);
+  });
 });

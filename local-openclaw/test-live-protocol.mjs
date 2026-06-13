@@ -154,6 +154,25 @@ await check("C3 /agents: discovery returns >=1 normalized agent", async () => {
   agentId = def.agentId;
 });
 
+await check("C3b /capabilities: served-instance target present after discovery, NO chat session (BUG-1)", async () => {
+  // Discovery (C3) connected to the gateway and the bridge captured its
+  // version at handshake. The served instance must now appear in
+  // /capabilities WITHOUT any live chat session — otherwise a supported
+  // gateway gates AgentFiles/ChatDefaults as "unknown version".
+  const { json } = await get("/capabilities");
+  const served = (json.targets ?? []).find(
+    (t) => t.gatewayVersion === VERSION,
+  );
+  assert(
+    served !== undefined,
+    `no served-instance target carrying gatewayVersion ${VERSION} (targets: ${JSON.stringify(json.targets)})`,
+  );
+  // Capabilities resolve to the manifest's verdict for THIS version (no live
+  // session needed). E.g. on 2026.6.5 agentFiles/configDefaults are true; on
+  // 2026.5.19 they are false — the point is the version is KNOWN, not unknown.
+  assertEq(served.capabilities, resolved.capabilities, "resolved caps for served instance");
+});
+
 await check("C4 auth: wrong secret -> 401 on /agents and /send", async () => {
   const a = await get("/agents", { auth: "nope" });
   assertEq(a.status, 401, "/agents status");
