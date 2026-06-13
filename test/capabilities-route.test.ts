@@ -88,6 +88,7 @@ describe("GET /capabilities + /health (compat surface)", () => {
       "bridgeVersion",
       "capabilities",
       "compat",
+      "gatewayVersion",
       "instanceName",
       "protocolVersion",
       "targets",
@@ -312,5 +313,15 @@ describe("GET /capabilities with a configured gateway-version fallback", () => {
     // The previously-gated features now resolve TRUE.
     expect(t.capabilities.agentFiles).toBe(true);
     expect(t.capabilities.configDefaults).toBe(true);
+  });
+
+  test("reports the version at the TOP LEVEL (Convex attributes instance identity)", async () => {
+    // The top-level gatewayVersion is reported INDEPENDENTLY of any per-instance
+    // target or OPENCLAW_INSTANCE_NAME — it lets Convex (which owns instance
+    // identity via BRIDGE_INSTANCE_NAME) resolve the served instance itself.
+    const body = (await (await fetch(`${baseUrl}/capabilities`)).json()) as {
+      gatewayVersion: string | null;
+    };
+    expect(body.gatewayVersion).toBe("2026.6.5");
   });
 });

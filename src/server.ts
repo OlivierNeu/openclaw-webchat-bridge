@@ -1062,6 +1062,14 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         // The instance this bridge serves (null when undeclared). The app caches
         // this to correlate capabilities + the M2 routing guard.
         instanceName: config.instanceName,
+        // The best-known version of the SINGLE gateway this bridge serves,
+        // reported UNCONDITIONALLY at the top level (independent of any live
+        // session or OPENCLAW_INSTANCE_NAME). Convex OWNS instance identity (it
+        // knows the served instance via BRIDGE_INSTANCE_NAME), so it attributes +
+        // resolves the version-gated capabilities itself — the bridge no longer
+        // needs to echo its own instance name for AgentFiles/ChatDefaults to
+        // resolve. Same precedence as the targets: live/discovered > configured.
+        gatewayVersion: lastGatewayVersion ?? config.gatewayVersionFallback ?? null,
         capabilities: openclawCapabilities(),
         // Compat manifest (additive): the single source of truth for bridge/
         // protocol versions + per-provider validated capability tables, plus
