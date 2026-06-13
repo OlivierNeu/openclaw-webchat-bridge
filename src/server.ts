@@ -1027,6 +1027,29 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
     if (req.method === "GET" && req.url === "/capabilities") {
       // Non-secret provider capability descriptor (incl. agentDiscovery). The app
       // caches this to adapt its UI per provider. Unauthenticated like /health.
+
+      // Refresh the version fallback from any currently-live session first.
+      for (const t of registry.listLive()) noteGatewayVersion(t.gatewayVersion);
+      // SELF-SUFFICIENT version capture (BUG-1 fragility fix): lastGatewayVersion
+      // is in-memory (reset on restart) and otherwise only set by /agents
+      // discovery or a send. If it is STILL null and no live session can supply
+      // one, do a ONE-SHOT discovery here so the served-instance target carries a
+      // real version. Without this, the 5-min compat poll landing right after a
+      // bridge restart (before the 2-min /agents cron repopulates the closure)
+      // returns an empty/version-less target -> the frontend gates AgentFiles /
+      // ChatDefaults off ("version gateway inconnue"). Non-fatal: a failed
+      // discovery just preserves the prior behavior (live targets / empty).
+      if (lastGatewayVersion === null && registry.listLive().length === 0) {
+        try {
+          await discoverAgents(config, noteGatewayVersion);
+        } catch (err) {
+          console.error(
+            "[capabilities] one-shot version discovery failed (non-fatal):",
+            (err as Error)?.message ?? err,
+          );
+        }
+      }
+
       sendJson(res, 200, {
         // The instance this bridge serves (null when undeclared). The app caches
         // this to correlate capabilities + the M2 routing guard.
@@ -1038,17 +1061,14 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         bridgeVersion: BRIDGE_VERSION,
         protocolVersion: PROTOCOL_VERSION,
         compat: COMPAT_MANIFEST,
-        // Refresh the fallback from any currently-live session first, then build
-        // (live targets win; the served-instance fallback fills the no-session
-        // gap — see buildCapabilityTargets).
-        targets: (() => {
-          for (const t of registry.listLive()) noteGatewayVersion(t.gatewayVersion);
-          return buildCapabilityTargets(
-            registry.listLive(),
-            config.instanceName,
-            lastGatewayVersion,
-          );
-        })(),
+        // Live targets win; the served-instance fallback fills the no-session
+        // gap (see buildCapabilityTargets), now with a version reliably captured
+        // above even on a freshly-restarted bridge.
+        targets: buildCapabilityTargets(
+          registry.listLive(),
+          config.instanceName,
+          lastGatewayVersion,
+        ),
       });
       return;
     }

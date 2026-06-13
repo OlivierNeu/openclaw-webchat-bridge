@@ -94,6 +94,20 @@ describe("GET /capabilities + /health (compat surface)", () => {
     ]);
   });
 
+  test("/capabilities one-shot version discovery is NON-FATAL on an unreachable gateway", async () => {
+    // The handler now triggers a one-shot discovery to capture the gateway
+    // version when none is cached AND no session is live (the BUG-1 fragility
+    // fix — otherwise a compat poll right after a restart returns a version-less
+    // target). CONFIG points at a non-resolving host, so that discovery MUST
+    // fail silently: still HTTP 200, valid shape, empty targets — never a 500,
+    // never a hang.
+    const res = await fetch(`${baseUrl}/capabilities`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { targets: unknown[] };
+    expect(Array.isArray(body.targets)).toBe(true);
+    expect(body.targets).toEqual([]);
+  });
+
   test("/capabilities carries the compat manifest + versions", async () => {
     const body = (await (await fetch(`${baseUrl}/capabilities`)).json()) as {
       bridgeVersion: string;
