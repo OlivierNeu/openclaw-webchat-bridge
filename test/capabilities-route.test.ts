@@ -246,14 +246,71 @@ describe("buildCapabilityTargets (live-session projection)", () => {
 
   test("a live session for the served instance SUPPRESSES the fallback", () => {
     // The live target is more specific; the synthetic one must not duplicate it.
+    // Its REAL version wins over the configured fallback (precedence).
     const targets = buildCapabilityTargets([LIVE("2026.6.1")], "primary", "2026.6.5");
     expect(targets).toHaveLength(1);
     expect(targets[0]!.key).toBe("u-alice");
     expect(targets[0]!.gatewayVersion).toBe("2026.6.1");
   });
 
+  test("a live session with a NULL version is filled by the configured fallback (H1)", () => {
+    // Prod reality: a session connects but the gateway never reports
+    // server.version → null. WITHOUT the fill, this live target would resolve to
+    // the conservative floor (agentFiles off) and SUPPRESS the synthetic
+    // fallback. The configured version must fill it so features still resolve.
+    const targets = buildCapabilityTargets([LIVE(null)], "primary", "2026.6.5");
+    expect(targets).toHaveLength(1);
+    const t = targets[0]!;
+    expect(t.gatewayVersion).toBe("2026.6.5");
+    expect(t.capabilities.agentFiles).toBe(true);
+    expect(t.capabilities.configDefaults).toBe(true);
+  });
+
   test("fallback version beyond maxValidated flags the synthetic target", () => {
     const t = buildCapabilityTargets([], "primary", "2026.9.9")[0]!;
     expect(t.versionBeyondValidated).toBe(true);
+  });
+});
+
+// INTEGRATION: the configured OPENCLAW_GATEWAY_VERSION flows end-to-end. A fresh,
+// idle bridge whose gateway is unreachable (one-shot discovery FAILS non-fatally)
+// must STILL resolve the served instance's capabilities from the configured
+// fallback — the BUG-1 prod symptom (AgentFiles/ChatDefaults "version unknown"
+// right after a bridge restart, before any chat).
+describe("GET /capabilities with a configured gateway-version fallback", () => {
+  let server: Server;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const registry = new SessionRegistry(CONFIG, {} as ConvexWriter); // no live session
+    const health = new HealthRegistry(1000, () => 2000);
+    server = createBridgeServer({
+      config: { ...CONFIG, gatewayVersionFallback: "2026.6.5" },
+      registry,
+      health,
+    });
+    await new Promise<void>((res) => server.listen(0, res));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((res) => server.close(() => res()));
+  });
+
+  test("surfaces the served instance with the configured version + full caps", async () => {
+    const body = (await (await fetch(`${baseUrl}/capabilities`)).json()) as {
+      targets: Array<{
+        instanceName: string | null;
+        gatewayVersion: string | null;
+        capabilities: Record<string, boolean>;
+      }>;
+    };
+    expect(body.targets).toHaveLength(1);
+    const t = body.targets[0]!;
+    expect(t.instanceName).toBe("primary"); // == config.instanceName the app queries by
+    expect(t.gatewayVersion).toBe("2026.6.5");
+    // The previously-gated features now resolve TRUE.
+    expect(t.capabilities.agentFiles).toBe(true);
+    expect(t.capabilities.configDefaults).toBe(true);
   });
 });

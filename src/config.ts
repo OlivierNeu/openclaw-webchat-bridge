@@ -40,6 +40,19 @@ export interface BridgeConfig {
    */
   instanceName: string | null;
   /**
+   * OPTIONAL configured gateway version (e.g. "2026.6.5"), from
+   * OPENCLAW_GATEWAY_VERSION. A FALLBACK that /capabilities uses ONLY when no
+   * live session and no prior discovery has supplied the real version yet — so a
+   * freshly-restarted, idle bridge still resolves the served instance's
+   * capabilities (AgentFiles / ChatDefaults) instead of "version unknown"
+   * (BUG-1). The REAL discovered/live `server.version` ALWAYS wins (precedence:
+   * live session > discovered > this fallback), so a stale/wrong value
+   * self-corrects the moment a chat runs. Validated as a strict "YYYY.M.P"
+   * triple; a malformed value is ignored (undefined). Set it to the gateway
+   * version this instance runs.
+   */
+  gatewayVersionFallback?: string;
+  /**
    * Base directory the gateway writes outbound media into. The normalizer only
    * ever surfaces paths under `<dir>/...`; we read bytes from here to upload
    * into Convex storage. Mirrors OPENCLAW_MEDIA_OUTBOUND_DIR in backend/app.
@@ -109,6 +122,14 @@ function optionalEnvOrNull(name: string): string | null {
   return value || null;
 }
 
+/** Optional STRICT "YYYY.M.P" version env; undefined when unset OR malformed
+ *  (a bad value must never masquerade as a real gateway version → fail to
+ *  undefined so the conservative no-version policy applies instead). */
+function optionalVersionEnv(name: string): string | undefined {
+  const value = (process.env[name] ?? "").trim();
+  return /^\d+\.\d+\.\d+$/.test(value) ? value : undefined;
+}
+
 function parseIntEnv(name: string, fallback: number): number {
   const raw = (process.env[name] ?? "").trim();
   if (!raw) {
@@ -171,6 +192,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
       openclawToken: requireEnv("OPENCLAW_TOKEN"),
       deviceIdentity: loadDeviceIdentity(),
       instanceName: optionalEnvOrNull("OPENCLAW_INSTANCE_NAME"),
+      gatewayVersionFallback: optionalVersionEnv("OPENCLAW_GATEWAY_VERSION"),
       mediaOutboundDir: optionalEnv(
         "OPENCLAW_MEDIA_OUTBOUND_DIR",
         "/home/node/.openclaw/media/outbound",

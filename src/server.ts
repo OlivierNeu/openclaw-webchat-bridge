@@ -890,13 +890,21 @@ export function buildCapabilityTargets(
   const byKey = new Map<string, LiveTarget>();
   for (const t of live) byKey.set(t.canonical, t);
   const targets = [...byKey.values()].map((t) => {
-    const resolved = resolveCapabilities("openclaw", t.gatewayVersion);
+    // A live session's REAL captured version wins; but when it is null — the
+    // gateway never reported `server.version` at the handshake (observed in
+    // prod: a live session connects yet carries no version) — fall back to the
+    // configured version so the live target is NOT resolved to "unknown" and
+    // gate AgentFiles/ChatDefaults off. (Precedence: real live > configured >
+    // null.) This is what makes the fix hold even WITH a session live at the
+    // poll, not just the no-session synthetic case below.
+    const effectiveVersion = t.gatewayVersion ?? fallbackVersion;
+    const resolved = resolveCapabilities("openclaw", effectiveVersion);
     const target: CapabilityTarget = {
       key: t.canonical,
       instanceName,
       provider: "openclaw",
       agentId: t.agentId,
-      gatewayVersion: t.gatewayVersion,
+      gatewayVersion: effectiveVersion,
       capabilities: resolved.capabilities,
     };
     if (resolved.versionBeyondValidated) target.versionBeyondValidated = true;
@@ -1062,12 +1070,16 @@ export function createBridgeServer(deps: BridgeServerDeps): Server {
         protocolVersion: PROTOCOL_VERSION,
         compat: COMPAT_MANIFEST,
         // Live targets win; the served-instance fallback fills the no-session
-        // gap (see buildCapabilityTargets), now with a version reliably captured
-        // above even on a freshly-restarted bridge.
+        // gap (see buildCapabilityTargets). Fallback PRECEDENCE: a version
+        // captured from a live session/discovery (lastGatewayVersion) wins over
+        // the operator-configured OPENCLAW_GATEWAY_VERSION — so the configured
+        // value is just a deterministic floor for a fresh/idle bridge whose
+        // discovery hasn't (or can't) capture the real version yet, and it
+        // self-corrects the instant a real connection reports server.version.
         targets: buildCapabilityTargets(
           registry.listLive(),
           config.instanceName,
-          lastGatewayVersion,
+          lastGatewayVersion ?? config.gatewayVersionFallback ?? null,
         ),
       });
       return;
